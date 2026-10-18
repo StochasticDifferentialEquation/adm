@@ -13,6 +13,7 @@ import com.odtheking.odin.events.EntityEvent
 import com.odtheking.odin.events.LevelEvent
 import com.odtheking.odin.events.RenderExtractEvent
 import com.odtheking.odin.events.TickEvent
+import com.odtheking.odin.events.core.EventBus
 import com.odtheking.odin.events.core.on
 import com.odtheking.odin.events.core.onReceive
 import com.odtheking.odin.features.Category
@@ -85,7 +86,7 @@ object DungeonSplits : Module(
      * The HUD is made up front because a HUD has to exist before the run that fills it.
      */
     private val bloodHud = registerSetting(
-        HUD("BR Sub Split", "What happened inside Blood Rush, room by room.", true, 780, 229, 0.9f) { example ->
+        HUD("BR Sub Split", "What happened inside Blood Rush, room by room.", false, 780, 229, 0.9f) { example ->
             if (example) return@HUD draw(this, listOf(
                 "§70.52s §8| \t§c1.73s \t§5Hallway: \t§62.31s",
                 "\t§411.73s \t§dDino: \t§622.31s",
@@ -111,7 +112,7 @@ object DungeonSplits : Module(
     private val crushView = StormCrushView()
     enum class StormLevel { COMPACT, DETAILED }
     private val stormHud = registerSetting(
-        HUD("Storm Sub Split", "Storm's phase: each step (Opening, Crush, Pin, Flight, Crush, Kill, Animation) graded, and under each what happened in it - Giga Lightning, his lightning line, leaving his spot, every pad read, each crush with the pillar and whether it came on the first check it could, breaking free, reaching Yellow. Shown until the run ends.", true, 330, 10, 0.9f) { example ->
+        HUD("Storm Sub Split", "Storm's phase: each step (Opening, Crush, Pin, Flight, Crush, Kill, Animation) graded, and under each what happened in it - Giga Lightning, his lightning line, leaving his spot, every pad read, each crush with the pillar and whether it came on the first check it could, breaking free, reaching Yellow. Shown until the run ends.", false, 330, 10, 0.9f) { example ->
             if (example) return@HUD draw(this, listOf(
                 "§bStorm §f41.30s",
                 "§aOpening §732.40s",
@@ -143,7 +144,7 @@ object DungeonSplits : Module(
     /** The Goldor sub split: each leap into the core after S4 and Goldor starting to move ([GoldorCore]). */
     private val core = GoldorCore()
     private val goldorHud = registerSetting(
-        HUD("Goldor Sub Split", "Watched from S4's start: when each player got into the core, timed from the core opening (teal and negative if they were in before it opened, grey with ~ if they weren't in view just before), and when Goldor started moving. Shown until the run ends.", true, 750, 10, 1f) { example ->
+        HUD("Goldor Sub Split", "Watched from S4's start: when each player got into the core, timed from the core opening (teal and negative if they were in before it opened, grey with ~ if they weren't in view just before), and when Goldor started moving. Shown until the run ends.", false, 750, 10, 1f) { example ->
             if (example) return@HUD draw(this, listOf("§eCore", "§7Teammate §3-2.40s", "§fYou §a0.05s", "§7Another §8~0.50s", "§7Last §61.35s", "§eGoldor moved §f1.40s §8(+0.05s after the last in)"))
             draw(this, core.lines(serverTicks, mc.player?.name?.string, core.counted(aliveNames())))
         }
@@ -215,6 +216,18 @@ object DungeonSplits : Module(
         SimOdinSplits.stop()
     }
 
+    /**
+     * Recore's Paste Last In Core is timed by the Goldor tracking here, so with it on the tracking
+     * runs with Sub Splits off too: subscribed while either wants it, with nothing drawn.
+     */
+    fun install() {
+        net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents.END_CLIENT_TICK.register {
+            val want = enabled || com.engineerclient.practice.Recore.let { it.enabled && it.pasteLast }
+            val on = this in EventBus.activeSubscribers
+            if (want && !on) EventBus.subscribe(this) else if (!want && on) EventBus.unsubscribe(this)
+        }
+    }
+
     private fun Stamp.minus(ticks: Int) = Stamp(realMs - ticks * 50L, tick - ticks)
 
     init {
@@ -232,7 +245,7 @@ object DungeonSplits : Module(
                     storm.onServerTick(now)
                     // Show Crush Info: each 20-tick crush check from his lightning until he dies.
                     val t = storm.phase(now)
-                    if (showCrushInfo.enabled && storm.checking && t != null && StormCrush.isCheck(t))
+                    if (enabled && showCrushInfo.enabled && storm.checking && t != null && StormCrush.isCheck(t))
                         crushView.check(now)?.let { (v, armed) -> storm.onCheck(now, v, armed) }
                 }
             }
@@ -352,7 +365,7 @@ object DungeonSplits : Module(
             }
         }
         on<RenderExtractEvent> {
-            if (showCrushInfo.enabled) with(crushView) { render(hitboxSeconds.value, hitboxMargins.enabled, pillarOutline.enabled, insideColor.value, outsideColor.value) }
+            if (enabled && showCrushInfo.enabled) with(crushView) { render(hitboxSeconds.value, hitboxMargins.enabled, pillarOutline.enabled, insideColor.value, outsideColor.value) }
         }
 
         on<EntityEvent.Remove> {
