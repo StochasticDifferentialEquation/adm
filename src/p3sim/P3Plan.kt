@@ -24,6 +24,8 @@ object P3Plan {
     /** The menu's Theoretical (Prototype 1, before it, isn't shown: a saved choice of it becomes this). */
     val THEORETICAL = SKILLS.indexOf("Theoretical")
     private val PROTOTYPE_1 = SKILLS.indexOf("Prototype 1")
+    /** Between Advanced PF and Theoretical in the menu (saved last: [Roles.PRESETS]). */
+    val NEAR_OPTIMAL = SKILLS.indexOf("Near Optimal")
 
     /**
      * Where each early enter stands (into: 5 = the core, just outside it in S4; 6 = the recore,
@@ -284,7 +286,8 @@ object P3Plan {
         EngineerClient.safely("p3sim plan load") {
             val f = file
             if (!f.exists()) return@safely
-            val s = gson.fromJson(f.readText(), Saved::class.java) ?: return@safely
+            val s = runCatching { gson.fromJson(f.readText(), Saved::class.java) }
+                .onFailure { PlayerFiles.setAside(f) }.getOrThrow() ?: return@safely
             s.skill?.let { skill = (if (it == PROTOTYPE_1) THEORETICAL else it).coerceIn(0, SKILLS.size - 1) }
             if (s.mine != null && s.mineFor != null && s.skill != PROTOTYPE_1) { mine.clear(); mine += s.mine; mineFor = s.mineFor }
             s.botMin?.let { botMin = it }
@@ -388,7 +391,7 @@ object P3Plan {
             file.parentFile.mkdirs()
             // A backup of the file before this session's first save, should a save ever lose something.
             if (!backedUp && file.exists()) { backedUp = true; file.copyTo(File(file.path + ".bak"), overwrite = true) }
-            file.writeText(gson.toJson(s))
+            PlayerFiles.writeAtomic(file, gson.toJson(s))
         }
     }
 }

@@ -27,7 +27,8 @@ import net.minecraft.network.chat.Component
 import com.mojang.blaze3d.platform.InputConstants
 
 /**
- * P3 Sim: F7's boss fight in a singleplayer world of its own ("p3sim"), to practice it alone.
+ * ADS (Advanced Dungeon Simulator, once P3 Sim): F7's boss fight in a singleplayer world of its own ("p3sim"), to
+ * practice it alone. The code, files and world keep the p3sim name (saved runs, plans and settings stay where they are).
  *
  * The world is the real arena at Hypixel's coordinates; the fight runs on the world's own
  * (integrated) server ([SimServer], [Fight]): Goldor, terminals, levers, devices, gates, death
@@ -38,12 +39,17 @@ import com.mojang.blaze3d.platform.InputConstants
  * [SimServer.isSim] (the server), both of which are only true in that one singleplayer world.
  */
 object P3Sim : Module(
-    name = "P3 Sim Beta",
+    name = "ADS",
     category = Category.custom("ADM", 860, 10),
-    description = "F7's boss in a singleplayer world of its own: /p3sim (or the title screen button) opens it. Only ever active in that world.",
+    description = "Advanced Dungeon Simulator: F7's boss in a singleplayer world of its own. /ads (or the title screen button) opens it. Only ever active in that world.",
     key = null,
 ) {
-    val menuKey by KeybindSetting("Menu Keybind", InputConstants.UNKNOWN, "Opens the P3 Sim Beta menu (a big Restart) in the sim world, as /p3sim and the SkyBlock Menu star in your hotbar do; the full menu is in Esc. Outside it, opens the sim.").onPress { openMenuOrSim() }
+    /** The short name, on buttons and in chat. */
+    const val NAME = "ADS"
+    /** The full name. */
+    const val FULL_NAME = "Advanced Dungeon Simulator"
+
+    val menuKey by KeybindSetting("Menu Keybind", InputConstants.UNKNOWN, "Opens the ADS menu (a big Restart) in the sim world, as /ads and the SkyBlock Menu star in your hotbar do; the full menu is in Esc. Outside it, opens the sim.").onPress { openMenuOrSim() }
     val restartKey by KeybindSetting("Restart Keybind", InputConstants.UNKNOWN, "In the sim: starts whatever you last started again (P3, S2, P2...), from scratch; in practice, the practice.").onPress {
         if (inSim) SimActions.send("restart")
     }
@@ -122,6 +128,8 @@ object P3Sim : Module(
     init {
         // Shown by default (Odin starts a toggleable HUD hidden); a saved config still decides.
         practiceHud.enabled = true; practiceTimeHud.enabled = true; practiceStartHud.enabled = true
+        // The full-run modules add their own settings here (docs/ads/ARCHITECTURE.md).
+        com.engineerclient.p3sim.run.AdsBootstrap.registerSettings(this)
     }
 
     val autoStart: Boolean get() = autoStartS.value
@@ -240,6 +248,7 @@ object P3Sim : Module(
         get() = localSim || (P3Party.joined && mc.level != null)
 
     fun init() {
+        com.engineerclient.p3sim.run.AdsBootstrap.init()
         SimNet.register()
         PartyServer.register()
         PartyClient.register()
@@ -259,36 +268,67 @@ object P3Sim : Module(
                 .executes { ctx -> ctx.source.player?.let { p -> Sim.asPlayer(p) { Loadouts.open(p) } }; 1 })
         }
         ClientCommandRegistrationCallback.EVENT.register { dispatcher, _ ->
-            val cmd = ClientCommands.literal("p3sim").executes { openMenuOrSim(); 1 }
-            for (s in Fight.Start.entries) cmd.then(ClientCommands.literal(s.name.lowercase()).executes {
-                if (inSim) SimActions.send("start", "what" to s.name) else SimWorld.open(); 1
-            })
-            cmd.then(ClientCommands.literal("stop").executes { SimActions.send("stop"); 1 })
-            cmd.then(ClientCommands.literal("rebuild").executes { SimWorld.rebuild(); 1 })
-            dispatcher.register(cmd)
+            // /ads, and /p3sim as before.
+            for (name in listOf("ads", "p3sim")) {
+                val cmd = ClientCommands.literal(name).executes { openMenuOrSim(); 1 }
+                for (s in Fight.Start.entries) cmd.then(ClientCommands.literal(s.name.lowercase()).executes {
+                    if (inSim) SimActions.send("start", "what" to s.name) else SimWorld.open(); 1
+                })
+                cmd.then(ClientCommands.literal("stop").executes { SimActions.send("stop"); 1 })
+                cmd.then(ClientCommands.literal("rebuild").executes { SimWorld.rebuild(); 1 })
+                // /ads dev ... and /ads run ...: the full-run modules' commands.
+                com.engineerclient.p3sim.run.AdsCommands.attach(cmd)
+                dispatcher.register(cmd)
+            }
             // /pos: where you stand and look (and the block you look at), copied, to set spots from.
             dispatcher.register(ClientCommands.literal("pos").executes { pos(); 1 })
         }
-        ClientTickEvents.START_CLIENT_TICK.register { EngineerClient.safely("p3sim bridge") { bridge(); SimItems.clientTick(); PartyClient.tick(); GhostGuard.clientTick() } }
-        ScreenEvents.AFTER_INIT.register { _, screen, w, _ ->
-            // The title screen's Minecraft Realms button becomes two: P3 Sim on the left half, Join
-            // Hypixel on the right. No Realms button (another mod's menu): a small P3 Sim button in the corner.
-            if (screen is TitleScreen) EngineerClient.safely("p3sim title button") {
-                val widgets = Screens.getWidgets(screen)
-                val realms = widgets.filterIsInstance<Button>()
-                    .firstOrNull { (it.message.contents as? net.minecraft.network.chat.contents.TranslatableContents)?.key == "menu.online" }
-                if (realms == null) {
-                    widgets.add(Button.builder(Component.literal("P3 Sim Beta")) { SimWorld.open() }.bounds(w - 84, 4, 80, 16).build())
-                    return@safely
-                }
-                val half = (realms.width - 4) / 2
-                widgets.remove(realms)
-                widgets.add(Button.builder(Component.literal("P3 Sim Beta")) { SimWorld.open() }
-                    .bounds(realms.x, realms.y, half, realms.height).build())
-                widgets.add(Button.builder(Component.literal("Join Hypixel")) { com.engineerclient.misc.RandomStuff.joinHypixel(screen) }
-                    .bounds(realms.x + realms.width - half, realms.y, half, realms.height).build())
+        // Odin scans a room once, when its centre chunk loads, and queues every chunk that loads before it believes it is in a dungeon (and never
+        // flushes the queue, since the sim posts no location change). So the area and floor are set at join, before the first chunk packet.
+        EngineerClient.safely("ads join hook") {
+            net.fabricmc.fabric.api.client.networking.v1.ClientPlayConnectionEvents.JOIN.register { _, _, _ ->
+                if (inSim) EngineerClient.safely("ads join area") { setArea(Island.Dungeon); DungeonListener.floor = Floor.F7 }
             }
-            // In the sim, Esc's P3 Sim Menu takes Open to LAN's place (right under Save and Quit if that
+        }
+        ClientTickEvents.START_CLIENT_TICK.register {
+            // Each on its own: Odin drift breaking the bridge must not stop the party's hello and roster.
+            EngineerClient.safely("p3sim bridge") { bridge() }
+            EngineerClient.safely("p3sim client items") { SimItems.clientTick() }
+            EngineerClient.safely("p3sim party client") { PartyClient.tick() }
+            EngineerClient.safely("p3sim ghost guard") { GhostGuard.clientTick() }
+        }
+        ScreenEvents.AFTER_INIT.register { _, screen, w, _ ->
+            // The title screen: ADS above Singleplayer, the same size; the Minecraft Realms button becomes Join Hypixel.
+            // No Singleplayer button (another mod's menu): a small ADS button in the corner.
+            if (screen is TitleScreen) EngineerClient.safely("ads title button") {
+                val widgets = Screens.getWidgets(screen)
+                fun key(b: Button) = (b.message.contents as? net.minecraft.network.chat.contents.TranslatableContents)?.key
+                val buttons = widgets.filterIsInstance<Button>()
+                val single = buttons.firstOrNull { key(it) == "menu.singleplayer" }
+                // The ADS button keeps the boss practice; in the beta a small "Run" button beside it opens the full run's start screen.
+                val runW = 44
+                // Room left for Run in the beta; in ADM the ADS button is the full width.
+                val runRoom = if (EngineerClient.BETA) runW + 4 else 0
+                val ads = Button.builder(Component.literal(FULL_NAME)) { SimWorld.open() }.let {
+                    if (single != null) it.bounds(single.x, single.y - single.height - 4, single.width - runRoom, single.height) else it.bounds(w - 164, 4, 160 - runRoom, 16)
+                }.build()
+                widgets.add(ads)
+                if (EngineerClient.BETA) {
+                    val run = Button.builder(Component.literal("§bRun")) { com.engineerclient.p3sim.clear.ui.UiModule.openStartScreen() }
+                        .tooltip(net.minecraft.client.gui.components.Tooltip.create(Component.literal("Starts a full F7 run: countdown, the dungeon, the blood room, then the boss. Choose the layout, party and lag first.")))
+                        .let { if (single != null) it.bounds(single.x + single.width - runW, single.y - single.height - 4, runW, single.height) else it.bounds(w - 4 - runW, 4, runW, 16) }.build()
+                    widgets.add(run)
+                    // GUI: ADS's own front page (AdsHubScreen), a small button right of Run; no world is opened.
+                    val gx = if (single != null) run.x + run.width + 4 else ads.x - 40
+                    widgets.add(Button.builder(Component.literal("GUI")) { mc.gui.setScreen(AdsHubScreen(screen)) }
+                        .bounds(gx, ads.y, 36, ads.height).build())
+                }
+                val realms = buttons.firstOrNull { key(it) == "menu.online" } ?: return@safely
+                widgets.remove(realms)
+                widgets.add(Button.builder(Component.literal("Join Hypixel")) { com.engineerclient.misc.RandomStuff.joinHypixel(screen) }
+                    .bounds(realms.x, realms.y, realms.width, realms.height).build())
+            }
+            // In the sim, Esc's ADS Menu takes Open to LAN's place (right under Save and Quit if that
             // isn't there), and the whole menu shifts so the cursor, which opening it puts in the middle of
             // the screen, is already on it.
             if (screen is net.minecraft.client.gui.screens.PauseScreen && inSim) EngineerClient.safely("p3sim pause button") {
@@ -297,7 +337,7 @@ object P3Sim : Module(
                 fun key(b: Button) = (b.message.contents as? net.minecraft.network.chat.contents.TranslatableContents)?.key
                 val lan = buttons.firstOrNull { key(it) in LAN_KEYS }
                 val quit = buttons.firstOrNull { key(it) in QUIT_KEYS } ?: buttons.maxByOrNull { it.y }
-                val main = Button.builder(Component.literal("§6P3 Sim Beta Menu")) { mc.gui.setScreen(SimRestartScreen()) }
+                val main = Button.builder(Component.literal("§6$NAME Menu")) { mc.gui.setScreen(SimRestartScreen()) }
                 val b = when {
                     lan != null -> { widgets.remove(lan); main.bounds(lan.x, lan.y, lan.width, lan.height) }
                     quit != null -> main.bounds(quit.x, quit.y + quit.height + 4, quit.width, 20)
@@ -351,6 +391,9 @@ object P3Sim : Module(
         bridged = true
         // On in the sim, so its HUDs (practice) show: the module's switch does nothing else.
         if (!enabled) toggle()
+        // The clear of a full run: Odin is left to derive the dungeon itself (see [clearBridge]).
+        if (com.engineerclient.p3sim.run.ClientRun.bridgeAsClear) { clearBridge(); return }
+        inClearBridge = false
         val me = mc.player?.name?.string ?: return
         setArea(Island.Dungeon)
         DungeonListener.floor = Floor.F7
@@ -378,10 +421,35 @@ object P3Sim : Module(
         }
     }
 
+    /** The bridge is in its clear mode (the stage is COUNTDOWN, CLEAR or BLOOD), so the switch back to the boss rewrites everything it left alone. */
+    private var inClearBridge = false
+
+    /**
+     * During the countdown, the clear and the blood room of a full run the bridge does NOT force "in boss": Odin's room scan, map scan and
+     * room-enter events switch themselves off while `inBoss` is set. It sets the floor once (Odin also reads it from the sidebar the server sends),
+     * puts the area back to SinglePlayer, which Odin treats as every area (setting Dungeon would lose that and leave Odin waiting for a location
+     * event that never comes), lets Odin work out inBoss from where the player stands (F7: x and z beyond -7 is the arena), and stops writing the
+     * party: Odin derives it from the tab list the server sends, and two writers would fight. In the boss stages the bridge is what it always was.
+     */
+    private fun clearBridge() {
+        if (!inClearBridge) {
+            inClearBridge = true
+            setArea(Island.SinglePlayer)
+            DungeonListener.inBoss = false
+            // What the bridge wrote for the boss practice goes; Odin's tab parser fills the party in again.
+            DungeonListener.dungeonTeammates = arrayListOf()
+            DungeonListener.dungeonTeammatesNoSelf = emptyList()
+            DungeonListener.leapTeammates = emptyList()
+            teamClass = -1; roster = ""
+        }
+        if (DungeonListener.floor == null) DungeonListener.floor = Floor.F7
+    }
+
     private var teamClass = -1
     private var roster = ""
 
     private fun unbridge() {
+        inClearBridge = false
         teamClass = -1
         DungeonListener.floor = null
         DungeonListener.inBoss = false
@@ -399,6 +467,8 @@ object P3Sim : Module(
         val areaField = areaField ?: return
         val skyblockField = skyblockField ?: return
         if (LocationUtils.currentArea != area) areaField.set(null, area)
-        if (skyblockField.getBoolean(null) != (area == Island.Dungeon)) skyblockField.setBoolean(null, area == Island.Dungeon)
+        // SinglePlayer (the clear of a full run) counts as SkyBlock too: it is the dungeon as far as Odin's gates go.
+        val skyblock = area == Island.Dungeon || area == Island.SinglePlayer
+        if (skyblockField.getBoolean(null) != skyblock) skyblockField.setBoolean(null, skyblock)
     }
 }

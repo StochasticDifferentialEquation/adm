@@ -127,7 +127,8 @@ class P2Storm : Fight.Phase("P2") {
 
     override fun stop() {
         if (::storm.isInitialized && !handed) storm.remove()
-        StormFx.clearSpeech()
+        // Handed on to Goldor: his last lines' stands stay their 40 ticks, as from StormEnd (the son line lasts past P3's start).
+        if (!handed) StormFx.clearSpeech()
     }
 
     private fun line(text: String) = StormFx.line(storm, text)
@@ -274,8 +275,8 @@ class P2Storm : Fight.Phase("P2") {
         pinnedAt = t
         lastCrush = pl
         takeoffAt = -1
-        // A player Mage's beam frees him; else the bot Mage's.
-        enrageAt = if (P3Sim.bots && !Players.isPlayerClass(DungeonClass.MAGE)) t + pinLength() else -1
+        // A player Mage's beam frees him; else the bot Mage's (no bots and nobody who can beam: the bot Mage's time too, not pinned for good).
+        enrageAt = if (!Players.isPlayerClass(DungeonClass.MAGE) && (P3Sim.bots || !P3Sim.mageAll)) t + pinLength() else -1
     }
 
     /** The enrage line; he holds still until takeoff 2-3 after it (median 2). */
