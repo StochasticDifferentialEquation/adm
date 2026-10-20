@@ -123,12 +123,23 @@ object BotsModule : AdsModule, BotService {
         val pos = HashMap<Int, Pt>()
         val y = HashMap<Int, Double>()
         val yaw = HashMap<Int, Float>()
+        /** The room each bot was last in (its height is found afresh in a new one). */
+        val roomOf = HashMap<Int, Int>()
         /** A bot sent to a key stand: it walks there, waits for the key to be taken and walks back. */
         val excursion = HashMap<Int, Excursion>()
         /** Key stands nobody has taken yet: kind to (the stand, the drop tick, whether a bot was already sent for it after a wait). */
         val stands = HashMap<KeyKind, StandWatch>()
         val kept = ArrayList<String>()
         val steps = StepClock(run.subRandom("bots.steps"))
+        /** Leaps already posted ("seat:door"), and each bot's spelling of the line (its mod's, one for the run). */
+        val leapsSaid = HashSet<String>()
+        val leapSpelling = HashMap<Int, Double>()
+        val leapRandom = run.subRandom("bots.leaps")
+        /** Blood camp mobs to the tick the bot camping blood kills them ([CampKills]). */
+        val campDeath = HashMap<java.util.UUID, Int>()
+        val campRandom = run.subRandom("bots.camp")
+        /** Wither doors the player opened that the next plan has not seen yet (the bots may leap to them). */
+        val personDoors = ArrayList<PersonDoor>()
         /** The teammate deaths still to come (none in most clears). */
         val deaths = ArrayList<TeamDeath>()
         /** When a mob lands a hit on a fighting teammate. */
@@ -159,6 +170,20 @@ object BotsModule : AdsModule, BotService {
 
     @Volatile var session: Session? = null
         private set
+
+    /** A test driver's switch: the human only watches and bots fill every seat (a five-bot clear to measure against real runs). Off in play. */
+    @Volatile var devObserve = false
+
+    /**
+     * The party changed classes before the start (Mort's Ready Up window): the bots are planned again from the start, each taking a class
+     * no human plays. Their records go first so they are made again with their new class. Server thread.
+     */
+    fun reclass(run: Run) {
+        session?.let { it.bodies.removeAll() }
+        session = null
+        run.state.players.values.removeIf { it.isBot }
+        onRunStart(run)
+    }
 
     private fun live(run: Run): Session? = session?.takeIf { it.run === run && it.active }
 
@@ -220,6 +245,7 @@ object BotsModule : AdsModule, BotService {
 
     /** The human seats: the run's non-bot records (the engine adds them), else the players in the world. */
     private fun humansOf(run: Run): List<Triple<UUID, String, String?>> {
+        if (devObserve) return emptyList()
         val fromState = run.state.players.values.filter { !it.isBot }.map { Triple(it.uuid, it.name, it.dungeonClass) }
         if (fromState.isNotEmpty()) return fromState
         return try { Sim.players().map { Triple(it.uuid, it.gameProfile.name, Players.classOf(it).name) } } catch (t: Throwable) { emptyList() }
@@ -234,7 +260,9 @@ object BotsModule : AdsModule, BotService {
         val assignment = BotStrategies.assignment(strategy, ctx)
         // A bot that is a ghost does no work until it is back: its rooms and doors go to the others.
         val seats = s.roster.seats.filter { seat -> seat.isHuman || s.roster.uuids[seat.index]?.let { run.state.players[it]?.ghost } != true }
-        return ClearPlanner(PlannerInput(run.plan, s.tables, seats, rnd, assignment, state, speedScale(), BotTuning.ROOM_WORK_SCALE, s.traversals, s.gates, s.areas)).build()
+        val people = s.personDoors.map { PersonDoor(it.door, it.seat, maxOf(it.t, state.now), it.at) }
+        s.personDoors.clear()
+        return ClearPlanner(PlannerInput(run.plan, s.tables, seats, rnd, assignment, state, speedScale(), BotTuning.ROOM_WORK_SCALE, s.traversals, s.gates, s.areas, people)).build()
     }
 
     override fun onStage(run: Run, from: RunStage?, to: RunStage) {
@@ -269,7 +297,38 @@ object BotsModule : AdsModule, BotService {
             s.executor.tick(t)
         }
         move(run, s, t)
-        if (t >= 0) { health(run, s, t); doorCracks(run, s, t); standFallback(run, s, t) }
+        if (t >= 0) { health(run, s, t); doorCracks(run, s, t); standFallback(run, s, t); leapLines(run, s, t); campKills(run, s, t) }
+    }
+
+    /**
+     * The bot camping blood kills the camp's mobs as they come down, when no person is in the room to do it: each dies a drawn time after it
+     * first stands in the room ([CampKills.life]). Without this a camp a bot holds never ends but by the blood module's safety timeout.
+     */
+    private fun campKills(run: Run, s: Session, t: Int) {
+        val seat = s.plan.milestones.bloodSeat ?: return
+        val blood = run.plan.blood?.index ?: return
+        val uuid = s.roster.uuids[seat] ?: return
+        val me = run.state.players[uuid] ?: return
+        if (me.ghost || run.plan.roomAtBlock(me.x, me.z)?.index != blood || s.world.humanInside(blood)) return
+        for (m in Services.mobs.inRoom(blood)) {
+            if (!m.alive || m.kind == CampKills.WATCHER) continue
+            val due = s.campDeath.getOrPut(m.id) { t + CampKills.life(s.campRandom.nextDouble()) }
+            if (t < due) continue
+            Services.damage.hurtMob(run, m.id, maxOf(m.hp, m.maxHp, 1.0) * 2.0, DamageSource.MELEE, uuid)
+            killFx(seat, m.x, m.y, m.z)
+        }
+    }
+
+    /** A bot that has just leapt to the door opener posts it in party chat, as its mod would ([Leaps]). */
+    private fun leapLines(run: Run, s: Session, t: Int) {
+        for (l in s.plan.leaps) {
+            if (l.t !in t - 2..t || !s.leapsSaid.add("${l.seat}:${l.door}")) continue
+            val me = s.roster.uuids[l.seat]?.let { run.state.players[it] } ?: continue
+            if (me.ghost) continue
+            val to = s.roster.uuids[l.to]?.let { run.state.players[it] } ?: continue
+            val u = s.leapSpelling.getOrPut(l.seat) { s.leapRandom.nextDouble() }
+            Services.channels.chat("§9Party §8> ${PartyStyle.bracket(me)} ${me.name}§f: ${Leaps.line(to.name, u)}")
+        }
     }
 
     /** From the first tick of the countdown (run tick [t], negative): every bot's walk from the spawn block to its gate, and the drop from the spawn height. */
@@ -384,7 +443,11 @@ object BotsModule : AdsModule, BotService {
             }
             val frame = s.motion.step(seat, t, speed, s.yaw[seat] ?: 0f, activity)
             s.yaw[seat] = frame.bodyYaw
-            val y = s.bodies.place(seat, b.dungeonClass, look, target.x, target.z, frame, near, s.y[seat] ?: BotTuning.DEFAULT_FLOOR_Y, s.motion.held(seat), dropY)
+            // Into another room: the height is looked for from the usual floor again, not from the last room's (which can be a cavity under this floor).
+            val room = run.plan.roomAtBlock(target.x, target.z)?.index
+            val reseat = room != null && room != s.roomOf[seat]
+            if (room != null) s.roomOf[seat] = room
+            val y = s.bodies.place(seat, b.dungeonClass, look, target.x, target.z, frame, near, if (reseat) BotTuning.DEFAULT_FLOOR_Y else s.y[seat] ?: BotTuning.DEFAULT_FLOOR_Y, s.motion.held(seat), dropY, reseat)
             s.y[seat] = y
             if (s.steps.due(seat, t, walking) && s.bodies.has(seat)) stepSound(target.x, y, target.z)
             rec.x = target.x; rec.y = y; rec.z = target.z
@@ -481,6 +544,12 @@ object BotsModule : AdsModule, BotService {
                 val byHuman = event.by != null && s.roster.seatOf(event.by)?.isHuman == true
                 val planned = s.plan.doors[event.door]
                 if (byHuman && planned != null && planned.openT > t + 10) schedule(s, t, "the player opened door ${event.door}")
+                // The bots may leap to the player as to a bot opener (the next plan works it in).
+                if (byHuman && run.plan.doors.getOrNull(event.door)?.kind == DoorKind.WITHER) {
+                    val seat = s.roster.seatOf(event.by!!)!!
+                    val rec = run.state.players[event.by]
+                    if (rec != null) { s.personDoors += PersonDoor(event.door, seat.index, t, Pt(rec.x, rec.z)); schedule(s, t, "the player opened door ${event.door} (leaps)") }
+                }
             }
             is RoomCleared, is RoomGreen -> {
                 val room = if (event is RoomCleared) event.room else (event as RoomGreen).room
@@ -491,7 +560,7 @@ object BotsModule : AdsModule, BotService {
             is PlayerDied -> if (s.roster.seatOf(event.player)?.isHuman == false) schedule(s, t, "a bot died")
             is PlayerRevived -> if (s.roster.seatOf(event.player)?.isHuman == false) schedule(s, t, "a bot came back")
             is KeyDropped -> keyDropped(s, event, t)
-            is KeyPicked -> { s.stands.remove(event.kind); s.excursion.values.forEach { it.release() } }
+            is KeyPicked -> { s.stands.remove(event.kind); s.excursion.values.forEach { it.release() }; s.executor.keyArrived(t) }
             is PlayerLeft -> if (s.roster.seatOf(event.player)?.isHuman == true) { s.covered = true; schedule(s, t, "a player left") }
             is SavepointRestored -> restoredNow(run, s)
             is DoorFell -> s.cracking.remove(event.door)?.let { crack(run, event.door, 255, it.breakerId) }
@@ -587,6 +656,10 @@ object BotsModule : AdsModule, BotService {
                 val y = s.bodies.groundY(p.x, p.z, s.y[bot.index] ?: rec.y.takeIf { it != 0.0 } ?: BotTuning.DEFAULT_FLOOR_Y)
                 s.y[bot.index] = y
                 out += LeapTarget(rec.uuid, rec.name, cls, p.x, y, p.z, s.yaw[bot.index] ?: 0f, 0f, !rec.ghost)
+            } else if (rec.extras["replayMate"] == true) {
+                // A replay's recorded teammate: where their recorded body is.
+                RunBlocks.get(Math.floor(rec.x).toInt(), 69, Math.floor(rec.z).toInt())
+                out += LeapTarget(rec.uuid, rec.name, cls, rec.x, rec.y, rec.z, rec.extras["yaw"] as? Float ?: 0f, 0f, !rec.ghost)
             } else {
                 val pl = try { Sim.players().firstOrNull { it.uuid == rec.uuid } } catch (t: Throwable) { null }
                 out += LeapTarget(rec.uuid, rec.name, cls, pl?.x ?: rec.x, pl?.y ?: rec.y, pl?.z ?: rec.z, pl?.yRot ?: 0f, pl?.xRot ?: 0f, !rec.ghost && pl != null)

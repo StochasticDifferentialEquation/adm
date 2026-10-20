@@ -83,14 +83,20 @@ class StateControllerTest {
         val r = Rig()
         r.until(4)
         assertEquals(CheckMark.NONE, r.room(0).check); assertEquals(CheckMark.NONE, r.room(1).check)
-        assertEquals(CheckMark.NONE, r.room(2).check, "the free door shows the room before the Fairy room")
-        assertEquals(CheckMark.GREEN, r.room(3).check, "the Fairy room goes straight from undiscovered to green")
+        assertEquals(CheckMark.UNDISCOVERED, r.room(2).check, "the free Fairy door shows neither side")
+        assertEquals(CheckMark.UNDISCOVERED, r.room(3).check)
         assertEquals(CheckMark.UNDISCOVERED, r.room(4).check)
-        assertEquals(3, r.run.state.counters.opened, "A, B and the Fairy room; the entrance never counts")
+        assertEquals(1, r.run.state.counters.opened, "A; the entrance never counts")
         r.until(10)
         assertEquals(CheckMark.GREEN, r.room(0).check, "the entrance turns green 5 ticks after it appears")
-        // opened = tiles of discovered rooms but the entrance (A, B, Fairy); completed = the Fairy room
-        assertEquals(3, r.run.state.counters.opened); assertEquals(1, r.run.state.counters.completed)
+        assertEquals(1, r.run.state.counters.opened); assertEquals(0, r.run.state.counters.completed)
+        assertEquals(0, r.run.state.counters.clearedPct)
+        // the Fairy room shows when someone walks in, straight to green
+        StatePlans.addPlayer(r.run, "Ann", x = DungeonFrame.tileCentre(3) + 0.5, z = DungeonFrame.tileCentre(0) + 0.5)
+        r.until(11)
+        assertEquals(CheckMark.GREEN, r.room(3).check, "the Fairy room goes straight from undiscovered to green")
+        // opened = tiles of discovered rooms but the entrance (A, Fairy); completed = the Fairy room
+        assertEquals(2, r.run.state.counters.opened); assertEquals(1, r.run.state.counters.completed)
         assertEquals(3, r.run.state.counters.clearedPct, "round(100 * 1 / 36)")
         assertEquals(listOf(RoomDiscovered(0, 0).javaClass), r.all<RoomDiscovered>().map { it.javaClass }.distinct())
     }
@@ -139,13 +145,32 @@ class StateControllerTest {
         assertEquals("You do not have the key for this door!", r.fx.plainChat().last().second)
         assertEquals(StateText.NO_KEY, r.fx.sounds.last())
         assertEquals(1, r.all<DoorLocked>().size)
-        r.c.touch(1, ann.uuid)           // a swing in the same tick is answered too, as on Hypixel
-        assertEquals(2, r.all<DoorLocked>().size)
+        // One pair a tick (the line and the sound, twice), however many clicks and swings land in it (DR, 139 runs: never one line, never four).
+        assertEquals(2, r.fx.plainChat().count { it.second == "You do not have the key for this door!" })
+        assertEquals(2, r.fx.sounds.count { it == StateText.NO_KEY })
+        r.c.touch(1, ann.uuid)           // a swing in the same tick: nothing more
+        assertEquals(1, r.all<DoorLocked>().size)
         assertEquals(2, r.fx.sounds.count { it == StateText.NO_KEY })
         r.until(6); r.c.touch(1, ann.uuid)
-        assertEquals(3, r.all<DoorLocked>().size)
+        assertEquals(2, r.all<DoorLocked>().size)
+        assertEquals(4, r.fx.sounds.count { it == StateText.NO_KEY })
         assertEquals(DoorOpenResult.NOT_A_DOOR, r.c.tryOpen(99, ann.uuid))
         assertEquals(DoorOpenResult.ALREADY_OPEN, r.c.tryOpen(0, ann.uuid), "the entrance door falls by itself")
+        assertTrue(r.c.touch(1, ann.uuid), "a shut door ends the hit")
+    }
+
+    @Test fun aHitOnAKeyDoorWithTheKeyOpensIt() {
+        // Hypixel takes a left click or a dig on a key door as a use of it (most recorded WITHER doors were opened that way).
+        val r = Rig(cfg = StateConfig(pickupRadius = 2.0), rules = StateRules(autoCollectTicks = 30, pickupInstantFrac = 1.0))
+        r.until(5)
+        val ann = StatePlans.addPlayer(r.run, "Ann", x = -150.0, z = -185.0)
+        StateController.keysFromRecording = true
+        try { assertTrue(r.c.pickUpKey(ann.uuid, KeyKind.WITHER, null, ann.x, ann.z)) } finally { StateController.keysFromRecording = false }
+        assertFalse(r.c.touch(1, ann.uuid), "it opened")
+        assertEquals(DoorPhase.FALLING, r.door(1).phase)
+        assertEquals(0, r.run.state.keys.witherHeld)
+        assertEquals(0, r.fx.plainChat().count { it.second == "You do not have the key for this door!" })
+        assertFalse(r.c.touch(1, ann.uuid), "an open door is not a door to hit")
     }
 
     @Test fun theBloodDoorNeedsTheBloodKeyAndStartsTheWatcherStage() {
@@ -264,6 +289,27 @@ class StateControllerTest {
         assertTrue(r.c.standList().isEmpty()); assertEquals(1, r.run.state.keys.witherHeld)
     }
 
+    @Test fun aReplayTakesItsKeysOnTheRecordedTicksOnly() {
+        StateController.keysFromRecording = true
+        try {
+            val r = Rig(cfg = StateConfig(pickupRadius = 2.0), rules = StateRules(autoCollectTicks = 30, pickupInstantFrac = 1.0))
+            r.until(5)
+            val ann = StatePlans.addPlayer(r.run, "Ann", x = -150.0, z = -185.0)
+            val ben = StatePlans.addPlayer(r.run, "Ben", x = -100.0, z = -100.0)
+            r.c.dropKey(1, -150.0, -185.0)
+            r.until(60)
+            assertEquals(1, r.c.standList().size, "standing on it, after the safety time: still lying")
+            // The recording says Ben took it: Ben has it, wherever he is.
+            assertTrue(r.c.pickUpKey(ben.uuid, KeyKind.WITHER, null, ben.x, ben.z))
+            assertTrue(r.c.standList().isEmpty()); assertEquals(1, r.run.state.keys.witherHeld)
+            assertEquals(ben.uuid, r.all<KeyPicked>().single().player)
+            // None lying: one is dropped where the taker stands, in a room still owing one, and taken at once; none owed: nothing.
+            assertTrue(r.c.pickUpKey(ann.uuid, KeyKind.BLOOD, null, ann.x, ann.z))
+            assertEquals(ann.uuid, r.all<KeyPicked>().last().player)
+            assertFalse(r.c.pickUpKey(ann.uuid, KeyKind.BLOOD, null, ann.x, ann.z))
+        } finally { StateController.keysFromRecording = false }
+    }
+
     @Test fun aGhostCannotTakeAKey() {
         val r = Rig()
         r.until(5)
@@ -340,7 +386,7 @@ class StateControllerTest {
         a.mobsRequiredAlive = 0
         r.run.bus.post(MobKilled(r.run.t, MobRef(UUID.randomUUID(), "x", 1, true, true), ann.uuid))
         assertEquals(CheckMark.WHITE, a.check)
-        assertEquals(1 + 1 /* the Fairy room */, r.run.state.counters.completed)
+        assertEquals(1, r.run.state.counters.completed)
         a.secretsFound = 1; r.run.bus.post(SecretFound(r.run.t, 1, SecretKind.CHEST, ann.uuid, 0, 0, 0))
         assertEquals(CheckMark.WHITE, a.check)
         a.secretsFound = 2; r.run.bus.post(SecretFound(r.run.t, 1, SecretKind.ITEM, ann.uuid, 0, 0, 0))
@@ -403,8 +449,9 @@ class StateControllerTest {
     }
 
     @Test fun aKeyRoomThatFinishesWithoutAKeyDropsOneAtItsCentre() {
+        // A room with mobs to kill: the mobs module gets its chance first.
         val r = Rig()
-        r.until(5); r.c.discover(4)
+        r.until(5); r.c.discover(4); r.room(4).mobsRequired = 1
         r.c.objectiveDone(4)
         assertTrue(r.c.standList().isEmpty(), "the mobs module gets its chance first")
         r.until(r.run.t + 5)
@@ -414,9 +461,46 @@ class StateControllerTest {
         assertEquals(1, r.all<KeyDropped>().size)
         // ... and when the mobs module did drop it, there is no second one
         val r2 = Rig()
-        r2.until(5); r2.c.discover(4); r2.c.objectiveDone(4); r2.c.dropKey(4, -60.0, -185.0)
+        r2.until(5); r2.c.discover(4); r2.room(4).mobsRequired = 1; r2.c.objectiveDone(4); r2.c.dropKey(4, -60.0, -185.0)
         r2.until(r2.run.t + 10)
         assertEquals(1, r2.all<KeyDropped>().size)
+    }
+
+    @Test fun aKeyRoomWithNoMobToKillGivesItsKeyAtOnceToWhoeverIsInIt() {
+        val r = Rig()
+        val (x, z) = r.c.centre(4)
+        val bo = StatePlans.addPlayer(r.run, "Bo", bot = true, x = x, z = z)
+        r.until(5)
+        r.c.objectiveDone(4)
+        assertTrue(r.c.standList().isEmpty(), "taken in the same tick")
+        assertEquals(bo.uuid, r.all<KeyPicked>().single().player)
+        // Nobody in the room: it lies at the centre for whoever comes.
+        val r2 = Rig()
+        r2.until(5); r2.c.discover(4); r2.c.objectiveDone(4)
+        assertEquals(4, r2.c.standList().single().room)
+    }
+
+    @Test fun aKeyABotKilledForAndLeftIsTakenAfterTheMeasuredWait() {
+        // pickupInstantFrac 0.0: never at once; the bot, far from the stand, has it within the measured wait (p95 26 ticks).
+        val r = Rig(rules = StateRules(pickupInstantFrac = 0.0))
+        r.until(5)
+        val bo = StatePlans.addPlayer(r.run, "Bo", bot = true, x = -100.0, z = -100.0)
+        r.run.state.rooms[1].mobsRequired = 1; r.run.state.rooms[1].mobsRequiredAlive = 0
+        r.run.bus.post(MobKilled(r.run.t, MobRef(UUID.randomUUID(), "x", 1, starred = true, required = true), bo.uuid))
+        r.c.dropKey(1, -150.0, -185.0)
+        assertEquals(1, r.c.standList().size, "not at once")
+        r.until(r.run.t + 27)
+        assertTrue(r.c.standList().isEmpty())
+        assertEquals(bo.uuid, r.all<KeyPicked>().single().player)
+        // A person who killed for it walks over: nothing is given to them.
+        val r2 = Rig(rules = StateRules(pickupInstantFrac = 0.0))
+        r2.until(5)
+        val ann = StatePlans.addPlayer(r2.run, "Ann", x = -100.0, z = -100.0)
+        r2.run.state.rooms[1].mobsRequired = 1; r2.run.state.rooms[1].mobsRequiredAlive = 0
+        r2.run.bus.post(MobKilled(r2.run.t, MobRef(UUID.randomUUID(), "x", 1, starred = true, required = true), ann.uuid))
+        r2.c.dropKey(1, -150.0, -185.0)
+        r2.until(r2.run.t + 40)
+        assertEquals(1, r2.c.standList().size)
     }
 
     // ---- the trap room's end chest -------------------------------------------------------------------------------------
@@ -519,8 +603,8 @@ class StateControllerTest {
 
     @Test fun aTrapRoomWithoutAPackRuleStillFinishesOnTheTimer() {
         val r = Rig(plan = StatePlans.trapPlan(Rot.SOUTH))       // default rules: no chestClears
-        r.until(5)
-        val at = r.room(2).tDiscovered!!                         // the free door showed the room at t=1
+        r.until(5); r.c.discover(2)
+        val at = r.room(2).tDiscovered!!
         r.until(at + 49); assertEquals(CheckMark.NONE, r.room(2).check)
         r.until(at + 51); assertEquals(CheckMark.WHITE, r.room(2).check, "the old pooled timer, so an older pack still plays")
     }
@@ -542,7 +626,7 @@ class StateControllerTest {
         r.until(5); r.c.discover(2)
         r.run.bus.post(PuzzleFailed(r.run.t, 0, 2, null, "wrong"))
         assertEquals(CheckMark.RED, r.room(2).check)
-        assertEquals(1, r.run.state.counters.completed, "red does not count as completed (only the Fairy room does)")
+        assertEquals(0, r.run.state.counters.completed, "red does not count as completed")
         r.run.bus.post(PuzzleSolved(r.run.t, 0, 2, null))
         assertEquals(CheckMark.GREEN, r.room(2).check)
     }
@@ -551,7 +635,7 @@ class StateControllerTest {
         val r = Rig()
         r.until(30)
         val (opened, completed) = RoomChecks.counters(r.run.state.rooms)
-        assertEquals(3, opened); assertEquals(1, completed)
+        assertEquals(1, opened); assertEquals(0, completed)
         assertEquals(36, r.run.state.counters.total)
     }
 
@@ -586,6 +670,6 @@ class StateControllerTest {
         val r = Rig()
         r.until(30)
         assertEquals(CheckMark.GREEN, r.room(0).check)
-        assertEquals(1, r.run.state.counters.completed)
+        assertEquals(0, r.run.state.counters.completed)
     }
 }

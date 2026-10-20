@@ -37,6 +37,34 @@ class LootBlessingTest {
         assertTrue(types.values.all { it > essence / 4 * 0.85 }, "every essence type about equally often: $types")
     }
 
+    @Test fun starredKillsDropWhatARunRecords() {
+        // About 170 starred kills a run: 4.7 blessings, and with the room clears about 4.1 Superboom TNT and 1.05 Revive Stones.
+        val r = Random(11)
+        val runs = 2000
+        var bless = 0; var boom = 0; var revive = 0
+        val types = HashMap<Blessing, Int>()
+        repeat(runs * 170) {
+            when (val d = LootTables.mobKill(r)) {
+                is Drop.Blessing -> { bless++; types.merge(d.blessing, 1, Int::plus) }
+                is Drop.Item -> if (d.item == LootItem.SUPERBOOM) boom++ else revive++
+                else -> {}
+            }
+        }
+        assertEquals(4.7, bless.toDouble() / runs, 0.25)
+        assertEquals(3.2, boom.toDouble() / runs, 0.25)
+        assertEquals(0.85, revive.toDouble() / runs, 0.1)
+        assertEquals(0.34, types.getValue(Blessing.POWER).toDouble() / bless, 0.03)
+        assertEquals(0.13, types.getValue(Blessing.STONE).toDouble() / bless, 0.03)
+        assertTrue(Blessing.TIME !in types, "a mob never drops Time")
+    }
+
+    @Test fun aDroppedBlessingReadsLikeHypixels() {
+        assertEquals("A Blessing of Wisdom was picked up!", Blessings.pickedUp(Blessing.WISDOM).replace(Regex("§."), ""))
+        assertEquals("DUNGEON BUFF! A Blessing of Wisdom V was found! (13s)", Blessings.announceOwn(Blessing.WISDOM, 5, 277).replace(Regex("§."), ""))
+        assertEquals("DUNGEON BUFF! You found a Blessing of Life V! (26s)", Blessings.announceYouFound(Blessing.LIFE, 5, 534).replace(Regex("§."), ""))
+        assertEquals("[MVP+] p3wr has obtained Blessing of Life!", Blessings.obtained("§b[MVP§r§c+§r§b] p3wr", Blessing.LIFE).replace(Regex("§."), ""))
+    }
+
     @Test fun aRewardChestIsOneThatHoldsSomething() {
         // The harp roll belongs to the reward chests: just over half of the first opens.
         val r = Random(2)
@@ -115,9 +143,20 @@ class LootBlessingTest {
         assertTrue(Blessings.grantLines(Blessing.POWER, 1)[0].contains("+5.8§r§7 & §r§a+1.03x"))
     }
 
-    @Test fun theBoostIsTwentyFivePercent() {
-        assertTrue(Blessings.grantLines(Blessing.POWER, 5, Blessings.BOOST)[0].contains("+36.3§r§7 & §r§a+1.19x"), Blessings.grantLines(Blessing.POWER, 5, Blessings.BOOST).toString())
-        assertTrue(Blessings.grantLines(Blessing.LIFE, 5, Blessings.BOOST)[0].contains("+1.27x HP"))
+    @Test fun aBoostedDayReadsAsRecorded() {
+        // Every boosted line the recordings have (Oct 12-13), § codes off.
+        fun b(x: Blessing, l: Int) = Blessings.grantLines(x, l, Blessings.BOOST).map { it.replace(Regex("§."), "").replace(Regex("[\ue000-\uf8ff]"), "").trim() }
+        assertEquals(listOf("Granted you +36.3 & +1.18x  Strength.", "Also granted you +36.3 & +1.18x  Crit Damage."), b(Blessing.POWER, 5))
+        assertEquals(listOf("Granted you +7.3 & +1.04x  Strength.", "Also granted you +7.3 & +1.04x  Crit Damage."), b(Blessing.POWER, 1))
+        assertEquals(listOf("Granted you +14.5 & +1.07x  Strength.", "Also granted you +14.5 & +1.07x  Crit Damage."), b(Blessing.POWER, 2))
+        assertEquals(listOf("Granted you +36.3 & +1.18x  Intelligence and +24  Speed."), b(Blessing.WISDOM, 5))
+        assertEquals(listOf("Granted you +14.5 & +1.07x  Intelligence and +9.6  Speed."), b(Blessing.WISDOM, 2))
+        assertEquals(listOf("Granted you +7.3 & +1.04x  Defense and +7.2  Damage."), b(Blessing.STONE, 1))
+        assertEquals(listOf("Granted you +36.3 & +1.18x  Defense and +36  Damage."), b(Blessing.STONE, 5))
+        assertEquals(listOf("Granted you +1.27x HP and +1.27x  Health Regen."), b(Blessing.LIFE, 5))
+        assertEquals(listOf("Granted you +1.11x HP and +1.11x  Health Regen."), b(Blessing.LIFE, 2))
+        assertEquals(listOf("Granted you +1.05x HP and +1.05x  Health Regen."), b(Blessing.LIFE, 1))
+        assertEquals(listOf("Granted you +36.3 & +1.18x HP, +36.3 & +1.18x  Defense, +36.3 & +1.18x  Intelligence, and +36.3 & +1.18x  Strength."), b(Blessing.TIME, 5))
     }
 
     @Test fun theAnnouncementLinesMatchTheRecordedForms() {

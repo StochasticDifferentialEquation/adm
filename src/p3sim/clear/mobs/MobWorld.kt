@@ -51,6 +51,8 @@ internal class MobEntry(val record: MobRecord, val plan: PlannedMob, val arch: M
     var builtAt = Int.MIN_VALUE / 2
     var retryAt = Int.MIN_VALUE / 2
     var vanishes = 0
+    /** Level game time of the last build: the level's lookup is trusted only [MobWorld.LOOKUP_GRACE] ticks after it. */
+    var builtGameTime = 0L
     /** Builds that threw, in a row. Each one backs the next try off; the third makes a disguised mob an ordinary body instead. */
     var buildFailures = 0
     var plainBody = false
@@ -70,7 +72,9 @@ internal object MobWorld {
 
     /** The tag text for the mob's current HP. */
     fun tagText(e: MobEntry): String =
-        MobTags.nametagLegacy(e.tag, e.arch.name, e.modifier, e.record.hp, e.record.maxHp, e.plan.star)
+        if (BloodLooks.isBlood(e.arch)) BloodLooks.tag(e.arch, e.plan.modifier, e.record.hp, e.record.maxHp)
+        else if (LevelLooks.isLevel(e.arch)) LevelLooks.tag(e.arch, e.record.hp, e.record.maxHp)
+        else MobTags.nametagLegacy(e.tag, e.arch.name, e.modifier, e.record.hp, e.record.maxHp, e.plan.star)
 
     /**
      * Makes the mob's entities at its current position and adds them to the world: the body (a vanilla type with no brain, or a
@@ -82,7 +86,7 @@ internal object MobWorld {
         var disguised = arch.disguise && fakePlayers && !e.plainBody
         var profile: GameProfile? = null
         if (disguised) {
-            profile = e.profile ?: Disguise.profile(e.plan.id, Disguise.profileName(arch), arch.skin)
+            profile = e.profile ?: Disguise.profile(e.plan.id, Disguise.profileName(arch), arch.skin ?: Disguise.missingSkin(arch))
             if (!e.announced) e.announced = Disguise.announce(profile)
             if (!e.announced) { disguised = false; profile = null }
         }
@@ -103,9 +107,11 @@ internal object MobWorld {
             if (healthData && body is LivingEntity) MobBodies.setHealthData(body, e.record.hp)
             val text = tagText(e)
             MobBodies.dressTag(built.stand, Sim.legacy(text))
+            (built.stand as? com.engineerclient.p3sim.TransientStand)?.let { it.trackSquare = TAG_RANGE; tags += it }
             built.stand.snapTo(e.x, e.y + e.tag.dy, e.z, 0f, 0f)
             for (f in built.fillers) f.snapTo(e.x, e.y, e.z, 0f, 0f)
             Sim.spawn(body)
+            e.builtGameTime = level.gameTime
             for (f in built.fillers) Sim.spawn(f)
             Sim.spawn(built.stand)
             e.body = body; e.fillers = built.fillers; e.stand = built.stand; e.lastTag = text
@@ -125,6 +131,7 @@ internal object MobWorld {
         arch.entity == "minecraft:wither_skeleton" -> AdsWitherSkeleton(level)
         arch.entity == "minecraft:enderman" -> AdsEnderman(level)
         arch.entity == "minecraft:silverfish" -> AdsSilverfish(level)
+        arch.entity == "minecraft:giant" -> AdsGiant(level)
         else -> AdsZombie(level)
     }
 
@@ -135,6 +142,22 @@ internal object MobWorld {
         if (body !is LivingEntity) return
         val eq = arch.equipment
         when {
+            // The Watcher's NPCs: a stone sword and chainmail; his giant: plain leather armour.
+            BloodLooks.isBlood(arch) && body !is AdsGiant -> {
+                body.setItemSlot(EquipmentSlot.MAINHAND, ItemStack(Items.STONE_SWORD))
+                body.setItemSlot(EquipmentSlot.CHEST, ItemStack(Items.CHAINMAIL_CHESTPLATE))
+                body.setItemSlot(EquipmentSlot.LEGS, ItemStack(Items.CHAINMAIL_LEGGINGS))
+                body.setItemSlot(EquipmentSlot.FEET, ItemStack(Items.CHAINMAIL_BOOTS))
+            }
+            body is AdsGiant -> {
+                body.setItemSlot(EquipmentSlot.HEAD, ItemStack(Items.LEATHER_HELMET))
+                body.setItemSlot(EquipmentSlot.CHEST, ItemStack(Items.LEATHER_CHESTPLATE))
+                body.setItemSlot(EquipmentSlot.LEGS, ItemStack(Items.LEATHER_LEGGINGS))
+                body.setItemSlot(EquipmentSlot.FEET, ItemStack(Items.LEATHER_BOOTS))
+            }
+            MobGear.has(arch.id) -> MobGear.dress(body, arch.id, e.plan.id)
+            // Skeletor Prime holds a bone, the Undead Skeleton a bow.
+            LevelLooks.isLevel(arch) -> body.setItemSlot(EquipmentSlot.MAINHAND, ItemStack(if (LevelLooks.hand(arch) == "minecraft:bone") Items.BONE else Items.BOW))
             eq != null -> {
                 if (eq.mainhand == "minecraft:iron_sword") {
                     val sword = ItemStack(Items.IRON_SWORD)
@@ -234,8 +257,41 @@ internal object MobWorld {
         dematerialise(e)
     }
 
-    /** Removes the bodies whose death delay is over, each with its fillers and tag in the same tick. */
+    /**
+     * How near a player must be, on x and on z, for a mob's name tag to be sent: Hypixel sends the tag stand only within about 24 blocks
+     * (Dungeon Recorder, 223 F7 runs: tag stands added and removed at a sharp edge of 24 to 26 blocks, square on x/z, while the bodies
+     * reach 48), so a tag is never seen across the map or through several rooms. Vanilla would track a stand out to the view distance.
+     */
+    const val TAG_RANGE = 24
+
+    /** Ticks after a build before a body missing from the level's lookup counts as gone. */
+    const val LOOKUP_GRACE = 40
+
+    /** The live tag stands, their tracking re-checked every tick (vanilla re-checks only when someone crosses a 16-block section). */
+    private val tags = ArrayList<com.engineerclient.p3sim.TransientStand>()
+
+    private val entityMapField by lazy { net.minecraft.server.level.ChunkMap::class.java.getDeclaredField("entityMap").also { it.isAccessible = true } }
+    private var updatePlayer: java.lang.reflect.Method? = null
+
+    /** Adds or removes each live tag on every player's client as the 24-block square says. */
+    private fun trackTags(level: ServerLevel) {
+        tags.removeIf { it.isRemoved }
+        if (tags.isEmpty()) return
+        try {
+            val map = entityMapField.get(level.chunkSource.chunkMap) as it.unimi.dsi.fastutil.ints.Int2ObjectMap<*>
+            val players = level.players()
+            for (t in tags) {
+                val tracked = map.get(t.id) ?: continue
+                val m = updatePlayer ?: tracked.javaClass.getMethod("updatePlayer", net.minecraft.server.level.ServerPlayer::class.java).also { it.isAccessible = true; updatePlayer = it }
+                for (p in players) m.invoke(tracked, p)
+            }
+        } catch (t: Throwable) { if (!trackWarned) { trackWarned = true; log.warn("[ads] tag tracking: ${t.message}") } }
+    }
+    private var trackWarned = false
+
+    /** Removes the bodies whose death delay is over, each with its fillers and tag in the same tick; re-checks who sees each tag. */
     fun tick(level: ServerLevel) {
+        trackTags(level)
         if (dying.isEmpty()) return
         val now = level.gameTime
         val it = dying.iterator()
@@ -277,7 +333,19 @@ internal object RealStage : MobStage {
         val lv = level ?: return false
         return MobWorld.materialise(e, lv, MobsModule.fakePlayersOn(), MobsModule.healthDataOn())
     }
-    override fun isGone(e: MobEntry) = e.body?.isRemoved != false
+    /**
+     * The body is gone when it was removed, when its tag was (the tag is unloaded with its chunk), or when the level no longer holds it
+     * although its chunk is loaded: a body that is not saved leaves the level with its chunk without being marked removed, and
+     * checking the flag alone kept such a mob "live" with nothing in the world for good. Not in the first [MobWorld.LOOKUP_GRACE] ticks:
+     * right after a teleport (a practice start) a new body may not be in the lookup yet, and counting it gone held the mob back 10 s.
+     */
+    override fun isGone(e: MobEntry): Boolean {
+        val b = e.body ?: return true
+        if (b.isRemoved || e.stand?.isRemoved == true) return true
+        val lv = level ?: return false
+        if (lv.gameTime - e.builtGameTime < MobWorld.LOOKUP_GRACE) return false
+        return lv.getEntity(b.id) !== b && com.engineerclient.p3sim.run.RunBlocks.isLoaded(Math.floor(b.x).toInt(), Math.floor(b.z).toInt())
+    }
     override fun release(e: MobEntry) = MobWorld.dematerialise(e)
     override fun die(e: MobEntry) { val lv = level; if (lv != null) MobWorld.die(e, lv) else MobWorld.dematerialise(e) }
     override fun retract(e: MobEntry) = MobWorld.retract(e)
@@ -300,17 +368,40 @@ internal object RealStage : MobStage {
         MobWorld.follow(e)
         return doubleArrayOf(b.x, b.y, b.z)
     }
+    override fun canSee(e: MobEntry, x: Double, y: Double, z: Double): Boolean {
+        val b = e.body ?: return false
+        val lv = level ?: return false
+        val from = net.minecraft.world.phys.Vec3(b.x, b.y + b.eyeHeight, b.z)
+        val hit = lv.clip(net.minecraft.world.level.ClipContext(from, net.minecraft.world.phys.Vec3(x, y, z), net.minecraft.world.level.ClipContext.Block.COLLIDER, net.minecraft.world.level.ClipContext.Fluid.NONE, net.minecraft.world.phys.shapes.CollisionContext.empty()))
+        return hit.type == net.minecraft.world.phys.HitResult.Type.MISS
+    }
+    override fun place(e: MobEntry, x: Double, y: Double, z: Double) {
+        val body = e.body ?: return
+        val dx = x - body.x; val dz = z - body.z
+        if (dx * dx + (y - body.y) * (y - body.y) + dz * dz < 1e-6) return
+        stop(body)
+        val yaw = if (dx * dx + dz * dz > 1e-4) Math.toDegrees(Math.atan2(-dx, dz)).toFloat() else body.yRot
+        body.snapTo(x, y, z, yaw, body.xRot)
+        (body as? LivingEntity)?.let { it.yHeadRot = yaw; it.yBodyRot = yaw }
+    }
     override fun rescue(e: MobEntry) { e.body?.let { if (it.y < -8.0) it.snapTo(e.plan.x, e.plan.y, e.plan.z, e.plan.yaw, 0f) } }
 
-    /** Blocks per tick a unit of movement-speed attribute walks (a player's 0.1 is 4.317 blocks a second). */
+    /** Blocks per tick a unit of movement-speed attribute walks at full input (a player's 0.1 is 4.317 blocks a second). */
     private const val BPT_PER_ATTRIBUTE = 2.159
+
+    /**
+     * The speed a pathfinding mob needs to walk [bpt] blocks a tick. Its move control sets the speed and the forward input both to it, so it walks
+     * BPT_PER_ATTRIBUTE times its square (a zombie's 0.23 is 0.114, the 2.3 blocks a second it is known for), not times the speed as a player does.
+     */
+    internal fun mobSpeedFor(bpt: Double) = Math.sqrt(bpt.coerceAtLeast(0.0) / BPT_PER_ATTRIBUTE)
 
     override fun act(e: MobEntry, action: AiAction, targetY: Double, targetX: Double, targetZ: Double) {
         val body = e.body ?: return
         when (action) {
             AiAction.Idle -> stop(body)
             is AiAction.MoveTo -> move(e, body, action.x, if (e.ai.chasing && !targetY.isNaN()) targetY else body.y, action.z, action.speed)
-            AiAction.Melee, AiAction.Shoot -> faceAndSwing(body, targetX, targetZ)
+            // A swing or a shot is made standing: a fake player would otherwise keep the walk it had and push into its target.
+            AiAction.Melee, AiAction.Shoot -> { stop(body); faceAndSwing(body, targetX, targetZ) }
             is AiAction.Teleport -> body.snapTo(action.x, if (targetY.isNaN()) body.y else targetY, action.z, body.yRot, 0f)
         }
     }
@@ -342,7 +433,7 @@ internal object RealStage : MobStage {
                 val moved = e.lastNavX.isNaN() || Math.abs(e.lastNavX - x) + Math.abs(e.lastNavZ - z) > 1.0
                 if (e.navCooldown == 0 && (moved || body.navigation.isDone)) {
                     val attr = body.getAttributeValue(net.minecraft.world.entity.ai.attributes.Attributes.MOVEMENT_SPEED).coerceAtLeast(0.01)
-                    val mod = (speed / (attr * BPT_PER_ATTRIBUTE)).coerceIn(0.1, 6.0)
+                    val mod = (mobSpeedFor(speed) / attr).coerceIn(0.1, 6.0)
                     body.navigation.moveTo(x, y, z, mod)
                     e.navCooldown = 8; e.lastNavX = x; e.lastNavZ = z
                 }

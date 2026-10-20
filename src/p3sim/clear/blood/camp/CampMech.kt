@@ -32,7 +32,7 @@ data class Vec3(val x: Double, val y: Double, val z: Double) {
  *    door+60k ticks.
  *  - Every flight: face the target (the wall station plus one block up), from the next tick move v a tick in a straight line, stop
  *    when the squared distance to the target is below 1.5. He throws the head 10 ticks after the first tick at rest; a later head
- *    flies 40 ticks (the mob is added at throw+39), an initial one 80.
+ *    flies 40 ticks (the mob is added at throw+39), an initial one 80 (the mob at throw+79).
  *  - After the last later throw he flies home (0.50) on the next idle door+40k tick, whatever is alive.
  *  - The first later departure: with an initial mob alive on door+420 he leaves on door+420 SLOW; with all four dead he waits for
  *    door+440 (door+480 when a line of his is being said around it).
@@ -63,8 +63,12 @@ object CampMech {
     const val FLIGHT_INITIAL = 80
     const val FLIGHT_LATER = 40
 
-    /** A later mob is added this many ticks after the throw (initial mobs are added when their 80-tick flight ends). */
+    /**
+     * A mob is added this many ticks after its throw, a tick before its head lands: 39 for a later head, 79 for an initial one (139 DR runs:
+     * spawn minus first move 37-40 later, 77-80 initial, means 38.8 and 78.9; the head goes 0 or 1 tick after the spawn, both kinds).
+     */
     const val LATER_SPAWN = 39
+    const val INITIAL_SPAWN = 79
 
     /** Ticks he must have been at home before a SLOW first later departure. */
     const val HOME_MIN = 40
@@ -147,5 +151,41 @@ object CampMech {
         val prev = lines.lastOrNull { it.at < l } ?: return l
         val free = prev.at + prev.line.busy
         return if (free - l in 1..PASS_WINDOW) free else l
+    }
+
+    /**
+     * When each recorded line was asked for. A line that printed while the queue was free was asked for on that tick. A line that
+     * printed the moment the line before it ended (back to back) was asked for some time while that line was being said; the tick after
+     * it started is taken. The two lines a player's action sets off (a hit on him, a player out of reach) are taken as asked for when
+     * they printed.
+     */
+    fun requestsOf(printed: List<Request>): List<Request> {
+        val out = ArrayList<Request>()
+        var prev: Request? = null
+        for (p in printed.sortedBy { it.t }) {
+            val before = prev
+            val free = before == null || p.t > before.t + before.line.busy || p.line == Line.ATTACK || p.line == Line.LEDGE
+            out += Request(if (free) p.t else minOf(p.t, before!!.t + 1), p.line)
+            prev = p
+        }
+        return out
+    }
+
+    /** The class of the Watcher's chat line, or null for a line that is not his (or is the pass line). A line of his that no class knows keeps the queue as busy as a reaction. */
+    fun lineOf(chat: String): Line? {
+        val prefix = "[BOSS] The Watcher: "
+        if (!chat.startsWith(prefix)) return null
+        val text = chat.removePrefix(prefix)
+        return when {
+            text.startsWith("You have proven yourself") -> null
+            text == CampLines.INTRO || text == CampLines.INTRO_OTHER -> Line.INTRO
+            text in CampLines.SPAWN -> Line.SPAWN
+            text in CampLines.REACT -> Line.REACT
+            text in CampLines.HANDLE -> Line.HANDLE
+            text in CampLines.ENOUGH -> Line.ENOUGH
+            text in CampLines.ATTACK -> Line.ATTACK
+            text in CampLines.LEDGE -> Line.LEDGE
+            else -> Line.REACT
+        }
     }
 }

@@ -205,7 +205,59 @@ object SecretsModule : AdsModule, SecretService {
         }
     }
 
+    /**
+     * While a replay runs the team is the recording's: no Mimic or Prince kill drawn for bots, no tombs blown for a teammate's room check-off.
+     * The replay credits what the recording counted (secrets, crypts, the bonuses) on the tick it rose.
+     */
+    @Volatile var teamFromRecording = false
+
+    /**
+     * A replay's drops are the recording's: what a chest, a kill or a cleared room gives is a draw on Hypixel whose mechanism is
+     * UNMEASURED, so a replay draws none ([recordedBlessing], [recordedItem] and [recordedEssence] do the recorded ones on their tick).
+     */
+    @Volatile var dropsFromRecording = false
+
+    /** A blessing the recording shows: [finder] null for a nameless pickup, [obtained] when the "has obtained" line came with it, [timed] with the run clock. */
+    fun recordedBlessing(run: Run, finder: UUID?, b: Blessing, level: Int, timed: Boolean, obtained: Boolean) {
+        val rd = data?.takeIf { it.run === run } ?: return
+        val t = run.t
+        val f = who(rd, finder)
+        if (obtained && finder != null) Services.channels.chat(Blessings.obtained(f.label, b))
+        for (p in humans(rd)) {
+            val lines = ArrayList<String>()
+            if (finder == null) { lines += Blessings.pickedUp(b); lines += Blessings.announceOwn(b, level, t) }
+            else lines += if (p.uuid == finder) Blessings.announceYouFound(b, level, if (timed) t else null) else Blessings.announceOther(f.name, b, level, f.colour, if (timed) t else null)
+            lines += Blessings.grantLines(b, level, SecretsSettings.blessingBoost)
+            for (l in lines) Services.channels.chat(l, Audience.Only(p.uuid))
+            run.state.secrets.blessings.merge(b.name, level, Int::plus)
+            run.bus.post(BlessingGranted(t, b.name, level, p.uuid))
+        }
+    }
+
+    /** An item the recording shows someone obtained (Superboom TNT, a Revive Stone). */
+    fun recordedItem(run: Run, finder: UUID?, item: LootItem, count: Int) {
+        val rd = data?.takeIf { it.run === run } ?: return
+        giveItem(rd, who(rd, finder), item, count)
+    }
+
+    /** A chest's essence the recording shows. */
+    fun recordedEssence(run: Run, finder: UUID?, type: String, amount: Int) {
+        val rd = data?.takeIf { it.run === run } ?: return
+        val f = who(rd, finder)
+        val drop = Drop.Essence(type, amount)
+        tellEach(rd, f.uuid, SecretLines.chestEssenceSelf(drop), SecretLines.chestEssenceOther(f.colour, f.name, drop))
+        Services.channels.actionBarSegment("essence", "§d+${drop.amount} ${drop.type} Essence", ActionBarModel.REPLACES_DEFENSE, ESSENCE_SEGMENT_TICKS, Audience.Everyone)
+        for (h in humans(rd)) orbPing(h)
+    }
+
+    /** One standing cell of each tomb group of [room] not yet blown (world coordinates), for crediting a teammate's crypt. */
+    fun standingCrypts(run: Run, room: Int): List<com.engineerclient.p3sim.pack.Pos> {
+        val rd = d(run) ?: return emptyList()
+        return rd.groups.ofRoom(room, GroupKind.CRYPT).filter { !rd.groups.isDestroyed(it) }.mapNotNull { it.cells.firstOrNull() }
+    }
+
     private fun tickBonusMobs(rd: RunData) {
+        if (teamFromRecording) return
         val led = rd.run.state.secrets
         val t = rd.run.t
         rd.mimicAt?.let { if (t >= it && !led.mimicKilled) bonus(rd, BonusKind.MIMIC, null) }
@@ -213,6 +265,7 @@ object SecretsModule : AdsModule, SecretService {
     }
 
     override fun onRunEnd(run: Run, reason: com.engineerclient.p3sim.run.EndReason) {
+        FloorDrops.clear(); WallDebris.clear()
         data?.takeIf { it.run === run }?.let { discardEntities(it) }
     }
 
@@ -225,6 +278,7 @@ object SecretsModule : AdsModule, SecretService {
         if (now % 20 == 0) { applyFixes(rd); sendOwedLids(rd) }
         if (now - rd.lastSpawnPass >= SPAWN_PERIOD) { rd.lastSpawnPass = now; spawnPass(rd) }
         tickBonusMobs(rd)
+        FloorDrops.tick(run); WallDebris.tick()
         tickItems(rd)
         tickBats(rd)
         tickWalls(rd, now)
@@ -299,7 +353,7 @@ object SecretsModule : AdsModule, SecretService {
             if (s.kind != SecretKind.ITEM) continue
             val e = SecretWorld.entity(id) as? ItemEntity
             if (e == null || e.isRemoved) { rd.entities.remove(key); continue }
-            // The game's own pickup box: the player's, widened by a block sideways and half a block up and down.
+            // The pickup box: the player's, widened by [SecretsSettings.pickupRange] sideways and half a block up and down.
             val p = players.firstOrNull { it.boundingBox.inflate(pad, 0.5, pad).intersects(e.boundingBox) } ?: continue
             val at = e.position()
             if (SecretWorld.pickUp(e, p)) {
@@ -345,6 +399,11 @@ object SecretsModule : AdsModule, SecretService {
     /** Odin's bat secret detection listens for the bat's death sound at exactly this volume (a kill plays only the death sound, as recorded). */
     private const val BAT_VOLUME = 0.1f
 
+    /** The block leaving a wall cell flies off as debris ([WallDebris]). */
+    private fun debris(x: Int, y: Int, z: Int) {
+        RunBlocks.get(x, y, z)?.let { WallDebris.spawn(x, y, z, it) }
+    }
+
     private fun tickWalls(rd: RunData, now: Int) {
         if (rd.walls.isEmpty()) return
         val it = rd.walls.iterator()
@@ -352,7 +411,7 @@ object SecretsModule : AdsModule, SecretService {
             val (due, cells) = it.next()
             if (now < due) continue
             it.remove()
-            for (c in cells) setOrFix(rd, c.x, c.y, c.z, Blocks.AIR.defaultBlockState())
+            for (c in cells) { debris(c.x, c.y, c.z); setOrFix(rd, c.x, c.y, c.z, Blocks.AIR.defaultBlockState()) }
         }
     }
 
@@ -399,7 +458,10 @@ object SecretsModule : AdsModule, SecretService {
         val c = rd.book.claim(room, kind, by, x, y, z)
         if (c is Claim.Credited) {
             c.site?.let { afterFound(rd, it, by) }
-            if ((c.site?.kind ?: kind) == SecretKind.BAT) batCounted(rd, by)
+            if ((c.site?.kind ?: kind) == SecretKind.BAT) {
+                batCounted(rd, by)
+                if (rd.miscRandom.nextDouble() < BAT_ANNOUNCE) botSays(rd, by, "Bat Killed!")
+            }
             if (c.autoCredited > 0 && rd.book.autoCreditedRooms.contains(room)) {
                 org.slf4j.LoggerFactory.getLogger("engineerclient").info("[ads] secrets: room {} counted {} secret(s) the room data does not place", room, c.autoCredited)
             }
@@ -471,14 +533,51 @@ object SecretsModule : AdsModule, SecretService {
         bonus(rd, kind, by)
     }
 
+    // ---- teammates' mods in party chat ----------------------------------------------------------------------------------------------
+    // ADR, 147 five-player runs, T0 to Maxor: teammates (not the recorder) post "Bat Killed!" 1.29 times a run, "Mimic Killed!" from 0 to 3
+    // different teammates (55 / 57 / 29 / 6 runs, about 0.3 of each teammate when it dies), "Prince Killed!" by one teammate in 39 percent
+    // of runs (about 0.6 of the killings). UNMEASURED: the delay after the kill (a mod posts at once; here 1 to 15 ticks).
+    /** Chance a bot's bat kill is posted. */
+    const val BAT_ANNOUNCE = 0.55
+    /** Chance each bot posts the Mimic's death. */
+    const val MIMIC_ANNOUNCE = 0.3
+    /** Chance the Prince's killer posts it. */
+    const val PRINCE_ANNOUNCE = 0.6
+
+    /** A bot's mod posting [text] in party chat a moment later; nothing for a human (their own mods post for them) or nobody. */
+    private fun botSays(rd: RunData, id: UUID?, text: String) {
+        val w = who(rd, id)
+        // A replay's teammates said what the recording says they did.
+        if (id == null || !w.bot || teamFromRecording) return
+        val line = "§9Party §8> ${w.bracket} ${w.name}§f: $text"
+        rd.later.add(rd.run.serverTick + 1 + rd.miscRandom.nextInt(15), { Services.channels.chat(line) })
+    }
+
+    private fun bots(rd: RunData): List<UUID> = rd.run.state.players.filterValues { it.isBot && !it.ghost }.keys.toList()
+
     private fun bonus(rd: RunData, kind: BonusKind, by: UUID?, loud: Boolean = true) {
         if (!rd.book.bonus(kind, by)) return
         when (kind) {
-            BonusKind.PRINCE -> if (loud) Services.channels.chat("§r§eA Prince falls. §r§a+1 Bonus Score")
+            BonusKind.MIMIC -> for (b in bots(rd)) if (rd.miscRandom.nextDouble() < MIMIC_ANNOUNCE) botSays(rd, b, "Mimic Killed!")
+            BonusKind.PRINCE -> {
+                val killer = by ?: bots(rd).takeIf { it.isNotEmpty() }?.let { it[rd.miscRandom.nextInt(it.size)] }
+                if (rd.miscRandom.nextDouble() < PRINCE_ANNOUNCE) botSays(rd, killer, "Prince Killed!")
+            }
+            else -> {}
+        }
+        when (kind) {
+            BonusKind.PRINCE -> if (loud) {
+                // Only the killer gets the line (139 DR runs: 16 lines, none in a run where a teammate posted "Prince Killed!"; the 54
+                // runs where a teammate killed it have none). A timed roll has no killer: it shows as yours.
+                val line = "§r§eA Prince falls. §r§a+1 Bonus Score"
+                if (by == null) Services.channels.chat(line) else for (h in humans(rd)) if (h.uuid == by) Services.channels.chat(line, Audience.Only(h.uuid))
+            }
             BonusKind.BAT -> {
-                Services.channels.chat("§r§eA Bat has been slain. §r§a+1 Bonus Score")
-                // Two orb pings at every human's own position: a spread one at volume 0.5 and the usual one.
-                for (h in humans(rd)) {
+                // Only the bat's killer gets the line and the pings (139 DR runs: 52 lines, each on the recorded player's own kill, all with
+                // the pings; of 30 runs whose bonus bat a teammate killed, no line, and a ping in one).
+                for (h in humans(rd)) if (h.uuid == by) {
+                    Services.channels.chat("§r§eA Bat has been slain. §r§a+1 Bonus Score", Audience.Only(h.uuid))
+                    // Two orb pings at the killer's position: a spread one at volume 0.5 and the usual one.
                     orbPing(h, 0.5f, SecretSounds.bonusPing(rd.sounds))
                     orbPing(h)
                 }
@@ -494,6 +593,8 @@ object SecretsModule : AdsModule, SecretService {
 
     override fun breakerRefusal(run: Run, x: Int, y: Int, z: Int): String? {
         val rd = d(run) ?: return null
+        // Before T0 the server puts every block back and says nothing (139 DR runs: 5,596 digs before T0, none broke, no line).
+        if (run.t0Tick == null || run.t < 0) return ""
         val state = RunBlocks.get(x, y, z)
         // Any chest is a secret block, found or not: the Dungeonbreaker never digs one.
         if (SecretWorld.isChestBlock(state)) return BreakerRules.REFUSAL
@@ -536,7 +637,7 @@ object SecretsModule : AdsModule, SecretService {
         if (!rd.groups.destroy(g)) return 0
         val air = Blocks.AIR.defaultBlockState()
         val first = (if (aim == null) g.cells.firstOrNull() else g.cells.minByOrNull { sq(it.x - aim.x) + sq(it.y - aim.y) + sq(it.z - aim.z) })
-        if (first != null) setOrFix(rd, first.x, first.y, first.z, air)
+        if (first != null) { debris(first.x, first.y, first.z); setOrFix(rd, first.x, first.y, first.z, air) }
         val rest = g.cells.filter { it !== first }
         if (rest.isNotEmpty()) rd.walls += (rd.run.serverTick + 1) to rest
         if (g.kind == GroupKind.CRYPT) rd.book.crypt(g.room, by)
@@ -584,7 +685,7 @@ object SecretsModule : AdsModule, SecretService {
             if (s.kind == SecretKind.CHEST || s.kind == SecretKind.LOCKED_CHEST) startChest(rd, s, by, delay = CHEST_STAGGER * chestsOpened++)
         }
         // A teammate blows some of the room's tombs too (the team Crypts count rises without the player), a moment after the check-off.
-        for (g in rd.groups.ofRoom(room, GroupKind.CRYPT)) {
+        if (!teamFromRecording) for (g in rd.groups.ofRoom(room, GroupKind.CRYPT)) {
             if (rd.groups.isDestroyed(g) || rd.botBlasts.any { it.second === g }) continue
             if (rd.miscRandom.nextDouble() < CRYPT_BOT_P) rd.botBlasts += Triple(rd.run.serverTick + rd.miscRandom.nextInt(CRYPT_BOT_DELAY + 1), g, by)
         }
@@ -680,7 +781,7 @@ object SecretsModule : AdsModule, SecretService {
             openTrapped(rd, s, by, start)
             return
         }
-        rd.chests[s.key] = ChestRec(s, LootTables.chest(chestRandom(rd, s)), by, start)
+        rd.chests[s.key] = ChestRec(s, if (dropsFromRecording) Drop.Nothing else LootTables.chest(chestRandom(rd, s)), by, start)
     }
 
     /** The Mimic: a plain zombie stands at the chest a tick after the click, and is dead a few ticks later; the Mimic's point counts then. */
@@ -808,8 +909,53 @@ object SecretsModule : AdsModule, SecretService {
 
     /** A cleared room may drop Superboom TNT or a Revive Stone for whoever cleared it (UNMEASURED mechanism, measured rate; see [LootTables.roomClear]). */
     private fun roomClearDrop(rd: RunData, room: Int) {
+        if (dropsFromRecording) return
         val drop = LootTables.roomClear(rd.dropRandom) as? Drop.Item ?: return
         giveItem(rd, who(rd, clearer(rd, room)), drop.item, drop.count)
+    }
+
+    /**
+     * A starred mob died to [killer]: maybe an item for them, or a blessing for the party (see [LootTables.mobKill]). It lies where the mob fell
+     * ([FloorDrops]) until it is picked up; the line and the item come then. Without the mob's position it is given at once.
+     */
+    private fun mobKillDrop(rd: RunData, killer: UUID, mob: UUID) {
+        if (dropsFromRecording) return
+        val drop = LootTables.mobKill(rd.dropRandom) ?: return
+        val rec = Services.mobs.mob(mob)
+        val at = rec?.let { doubleArrayOf(it.x, it.y, it.z) }?.takeIf { !it[0].isNaN() && !(it[0] == 0.0 && it[2] == 0.0) }
+        val run = rd.run
+        when (drop) {
+            is Drop.Item -> {
+                if (at == null) { giveItem(rd, who(rd, killer), drop.item, drop.count); return }
+                val superboom = drop.item == LootItem.SUPERBOOM
+                val name = drop.item.colour + drop.item.displayName + (if (drop.count > 1) " §r§8x${drop.count}" else "")
+                val model = if (superboom) com.engineerclient.p3sim.SimItems.SUPERBOOM.copy() else FloorDrops.head("revive_stone", run)
+                FloorDrops.drop(run, name, model, superboom, at[0], at[1], at[2], 0, killer, rd.dropRandom) { by -> giveItem(rd, who(rd, by ?: killer), drop.item, drop.count) }
+            }
+            is Drop.Blessing -> {
+                if (at == null) { grantKillBlessing(rd, who(rd, killer), drop.blessing); return }
+                FloorDrops.drop(run, "§dBlessing of " + drop.blessing.displayName, FloorDrops.head(FloorDrops.BLESSING_TEXTURE, run), false, at[0], at[1], at[2], 1, killer, rd.dropRandom) { by -> grantKillBlessing(rd, who(rd, by ?: killer), drop.blessing) }
+            }
+            else -> {}
+        }
+    }
+
+    /** A dropped blessing: always V with the run clock; nameless `was picked up` or the finder's `has obtained`; everyone gets the buff. */
+    private fun grantKillBlessing(rd: RunData, finder: Who, b: Blessing) {
+        val t = rd.run.t
+        val level = Blessings.OWN_LEVEL
+        val boost = SecretsSettings.blessingBoost
+        val nameless = rd.miscRandom.nextDouble() < Blessings.KILL_PICKED_UP_SHARE
+        if (!nameless) Services.channels.chat(Blessings.obtained(finder.label, b))
+        for (p in humans(rd)) {
+            val lines = ArrayList<String>()
+            if (nameless) { lines += Blessings.pickedUp(b); lines += Blessings.announceOwn(b, level, t) }
+            else lines += if (p.uuid == finder.uuid) Blessings.announceYouFound(b, level, t) else Blessings.announceOther(finder.name, b, level, finder.colour, t)
+            lines += Blessings.grantLines(b, level, boost)
+            for (l in lines) Services.channels.chat(l, Audience.Only(p.uuid))
+            rd.run.state.secrets.blessings.merge(b.name, level, Int::plus)
+            rd.run.bus.post(BlessingGranted(t, b.name, level, p.uuid))
+        }
     }
 
     // ---- skulls and keys ----------------------------------------------------------------------------------------------------------
@@ -1017,7 +1163,7 @@ object SecretsModule : AdsModule, SecretService {
             val s = rd.plan.site(j.get("key").asString) ?: return@forEach
             val elapsed = j.get("elapsed")?.asInt ?: 0
             val by = j.get("by")?.takeIf { !it.isJsonNull }?.asString?.let { runCatching { UUID.fromString(it) }.getOrNull() }
-            val rec = ChestRec(s, LootTables.chest(chestRandom(rd, s)), by, now - elapsed)
+            val rec = ChestRec(s, if (dropsFromRecording) Drop.Nothing else LootTables.chest(chestRandom(rd, s)), by, now - elapsed)
             rec.done += Beats.playedBy(SecretChestFinale.schedule(rec.reward).map { it.at }, elapsed)
             rd.chests[s.key] = rec
             if (elapsed >= 1 && s.key != rd.trapped) rd.lidsOwed += s.key
@@ -1043,6 +1189,7 @@ object SecretsModule : AdsModule, SecretService {
         if (event is MobKilled) {
             val room = event.mob.room
             if (room != null && event.mob.required) rd.lastKiller[room] = event.by
+            if (room != null && event.mob.starred && event.by != null && run.plan.rooms.getOrNull(room)?.type != RoomType.BLOOD) mobKillDrop(rd, event.by, event.mob.id)
             return
         }
         if (event is RoomCleared) {

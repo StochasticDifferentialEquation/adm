@@ -9,6 +9,7 @@ import com.engineerclient.p3sim.run.api.Services
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import java.util.UUID
+import kotlin.math.roundToInt
 
 /** One step of the start of a run, on the run clock. */
 sealed interface StartStep {
@@ -23,6 +24,8 @@ sealed interface StartStep {
     /** The entrance room is discovered. */
     data object EntranceDiscovered : StartStep
     data object EntranceGreen : StartStep
+    /** A practice run's start: straight into the clear. */
+    data object PracticeGo : StartStep
 }
 
 /** A key stand on the floor, waiting for someone to pick it up. */
@@ -76,6 +79,7 @@ class StateController(val run: Run, val rules: StateRules, val cfg: StateConfig,
 
     /** Plans the countdown: sets T0, schedules every line and door of the start. Call once, in `onRunStart`. */
     fun start() {
+        if (plan.practice != null) { startPractice(); return }
         val lead = rules.startLeadTicks
         val delay = cfg.countdownDelayTicks.coerceAtLeast(0)
         // "Starting in 4" -> "1 second" is 60 ticks (3 gaps of 20), "1 second" -> Mort is `lead`.
@@ -95,9 +99,21 @@ class StateController(val run: Run, val rules: StateRules, val cfg: StateConfig,
         refreshCounters()
     }
 
+    /** Practice has no countdown, no Mort and no entrance: the clock starts now and the clear with it. */
+    private fun startPractice() {
+        run.setT0(run.serverTick)
+        lastT = run.t - 1
+        schedule.clear()
+        schedule.add(0, StartStep.PracticeGo)
+        state.milestones.countdownStartTick = state.milestones.countdownStartTick ?: run.serverTick
+        refreshCounters()
+    }
+
     // ---- tick ----------------------------------------------------------------------------------------------------------
 
     fun tick() {
+        // "Not Ready" in Mort's window holds the countdown: T0 moves on with the server, so the clock stays on this tick.
+        if (run.stage == RunStage.COUNTDOWN && plan.practice == null && run.t < 0 && ReadyUpMenu.holding()) run.t0Tick?.let { run.setT0(it + 1) }
         val t = run.t
         fx.tick()
         for (step in schedule.due(lastT, t)) runStep(step)
@@ -112,17 +128,19 @@ class StateController(val run: Run, val rules: StateRules, val cfg: StateConfig,
 
     private fun runStep(step: StartStep) {
         when (step) {
-            is StartStep.Ready -> state.players.values.toList().getOrNull(step.index)?.let { fx.chat(StateText.ready(it.name)) }
+            is StartStep.Ready -> state.players.values.toList().getOrNull(step.index)?.let { fx.chat(StateText.ready(it.name, nameColourOf(it.uuid))) }
             is StartStep.Starting -> { fx.chat(StateText.startingIn(step.seconds)); fx.sound(StateText.COUNTDOWN_TICK) }
             is StartStep.Mort -> {
                 if (step.index == 0) classDoubledLines()
                 fx.chat(StateText.mort(step.index)); fx.sound(StateText.MORT_LINE)
                 if (step.index == 0) run.requestStage(RunStage.CLEAR)
+                if (step.index == 1) MortNpc.blankNames(MortNpc.BLANK_AFTER_SECOND_LINE)
             }
             StartStep.EntranceDoorFalls -> plan.doors.filter { it.kind == DoorKind.ENTRANCE }.forEach { beginFall(it.index, null) }
             StartStep.FreeDoorFalls -> plan.doors.filter { it.kind == DoorKind.FAIRY }.forEach { beginFall(it.index, null) }
             StartStep.EntranceDiscovered -> plan.entrance?.let { discover(it.index) }
             StartStep.EntranceGreen -> plan.entrance?.let { mark(it.index, CheckMark.GREEN) }
+            StartStep.PracticeGo -> run.requestStage(RunStage.CLEAR)
         }
     }
 
@@ -164,17 +182,30 @@ class StateController(val run: Run, val rules: StateRules, val cfg: StateConfig,
         return DoorOpenResult.OPENED
     }
 
-    /** A player touched a closed key door (a swing at it). Says the no-key line when the party has no key; does nothing otherwise. */
-    fun touch(door: Int, by: UUID?) {
-        val d = plan.doors.getOrNull(door) ?: return
-        val needs = when (d.kind) { DoorKind.WITHER -> KeyKind.WITHER; DoorKind.BLOOD -> KeyKind.BLOOD; else -> return }
-        if (state.doors[door].phase == DoorPhase.CLOSED && !ledger.has(needs)) noKey(door, by)
+    /**
+     * A player hit a closed key door (a left click or a dig): Hypixel takes it as a use of the door, so it opens with a key in the party
+     * (DR, 139 runs: 168 of your 229 WITHER door openings came from a dig with no right click) or says the no-key line. True when the door
+     * is a closed key door that stays shut.
+     */
+    fun touch(door: Int, by: UUID?): Boolean {
+        val d = plan.doors.getOrNull(door) ?: return false
+        if (d.kind != DoorKind.WITHER && d.kind != DoorKind.BLOOD) return false
+        if (state.doors[door].phase != DoorPhase.CLOSED) return false
+        return tryOpen(door, by) != DoorOpenResult.OPENED
     }
+
+    /** How many times Hypixel says the no-key line (and plays its sound) for one hit. */
+    private val NO_KEY_REPEAT = 2
+
+    /** The tick each player was last told there is no key. */
+    private val noKeyTold = HashMap<UUID?, Int>()
 
     private fun noKey(door: Int, by: UUID?) {
         val t = run.t
-        // Hypixel answers a use-click and a swing each, so a click can say it twice in one tick: no de-duplication here.
-        fx.chat(StateText.NO_KEY_LINE, by); fx.sound(StateText.NO_KEY, by)
+        // Hypixel says it as a pair, line and sound twice, once a tick however many clicks and swings hit the door that tick
+        // (DR, 139 runs: 2,025 ticks of 2 lines and 2 sounds, never one; a click, a swing, or both with a dig start all give one pair).
+        if (noKeyTold.put(by, t) == t) return
+        repeat(NO_KEY_REPEAT) { fx.chat(StateText.NO_KEY_LINE, by); fx.sound(StateText.NO_KEY, by) }
         if (by != null) run.bus.post(DoorLocked(t, door, by))
     }
 
@@ -188,8 +219,10 @@ class StateController(val run: Run, val rules: StateRules, val cfg: StateConfig,
         val delay = if (d.kind == DoorKind.WITHER || d.kind == DoorKind.BLOOD) rules.keyDoorBarrierDelay else 0
         for (s in falls.begin(door, t, rules.barrierFor(d.kind), rules.firstBlockToRestTicks, delay)) applyStep(s)
         fx.spawnDoorDebris(d)
-        // A door that fell shows the rooms on both sides on the map.
-        discover(d.roomA); discover(d.roomB)
+        // A door that fell shows the rooms on both sides on the map. Not the Fairy door that falls at the start: the Fairy room shows when someone walks in
+        // (ADR, 180 runs: a median 15 ticks before the first map marker inside, 189 after the start) and the room across it when its own turn comes
+        // (416 layouts: a median 137 ticks after the start, 9% by 60).
+        if (d.kind != DoorKind.FAIRY) { discover(d.roomA); discover(d.roomB) }
         run.bus.post(DoorOpened(t, door, d.kind, by))
     }
 
@@ -219,14 +252,32 @@ class StateController(val run: Run, val rules: StateRules, val cfg: StateConfig,
         val t = run.t
         val id = nextStandId++
         val y = fx.spawnStand(id, kind, x, z, rules.standYDefault)
-        val killer = lastKill[room]?.takeIf { t - it.second <= 2 }?.first
+        val killer = if (keysFromRecording) null else lastKill[room]?.takeIf { t - it.second <= 2 }?.first
         val stand = KeyStand(id, kind, room, x, y, z, t, killer)
         stands[id] = stand
         run.bus.post(KeyDropped(t, kind, room, x, y, z))
         if (killer != null && rng.nextDouble() < rules.pickupInstantFrac && canPick(killer)) pickUp(stand, killer)
+        // A bot that killed for it takes it after the measured wait: bots fight from range and never come within the pickup radius by
+        // chance, so a stand they left lay until someone happened past (a replay: 120 ticks, every door after it late).
+        else if (killer != null && state.players[killer]?.isBot == true) botPickups[id] = killer to t + rules.pickupDelayed.sample(rng.nextDouble()).roundToInt().coerceAtLeast(1)
     }
 
+    /** Key stands a bot will take: stand id to (bot, tick). */
+    private val botPickups = HashMap<Int, Pair<UUID, Int>>()
+
     private fun canPick(id: UUID): Boolean = state.players[id]?.let { !it.ghost } == true
+
+    /**
+     * A replay's pickup: [by] takes the oldest stand of [kind]; with none lying (the recording's key fell out of its player's sight, or
+     * ADS's plan had no key due there), one is dropped where [by] stands, in [room] (or the first room still owing one) and taken at once.
+     */
+    fun pickUpKey(by: UUID, kind: KeyKind, room: Int?, x: Double, z: Double): Boolean {
+        stands.values.filter { it.kind == kind }.minByOrNull { it.spawnT }?.let { pickUp(it, by); return true }
+        val r = room?.takeIf { ledger.pending(it) == kind } ?: run.plan.rooms.map { it.index }.firstOrNull { ledger.pending(it) == kind } ?: return false
+        dropKey(r, x, z)
+        stands.values.filter { it.kind == kind }.minByOrNull { it.spawnT }?.let { pickUp(it, by); return true }
+        return false
+    }
 
     private fun pickUp(stand: KeyStand, by: UUID) {
         if (stands.remove(stand.id) == null) return
@@ -241,7 +292,14 @@ class StateController(val run: Run, val rules: StateRules, val cfg: StateConfig,
     }
 
     private fun pollStands(t: Int) {
-        if (stands.isEmpty()) return
+        if (stands.isEmpty()) { botPickups.clear(); return }
+        // A replay takes its keys on the recorded ticks only ([pickUpKey]).
+        if (keysFromRecording) return
+        for ((id, due) in botPickups.entries.toList()) if (t >= due.second) {
+            botPickups.remove(id)
+            val stand = stands[id] ?: continue
+            if (canPick(due.first)) pickUp(stand, due.first)
+        }
         for (stand in stands.values.toList()) {
             val near = state.players.values.filter { !it.ghost }.map { it to dist(it, stand) }
             val taker = near.filter { it.second <= cfg.pickupRadius }.minByOrNull { it.second }?.first
@@ -292,7 +350,17 @@ class StateController(val run: Run, val rules: StateRules, val cfg: StateConfig,
         synth.remove(room)
         mark(room, RoomChecks.onObjectiveDone(r.secretsMax, r.secretsFound))
         // The mobs module drops the key on the kill; a room that finished without one (no mob to kill) still has to pay its key.
-        if (ledger.pending(room) != null) keyFallback.putIfAbsent(room, run.t + cfg.keyFallbackTicks)
+        // With no required mob there is no kill to wait for: the key comes now, to whoever finished the room (still standing in it).
+        if (ledger.pending(room) != null) { if (r.mobsRequired == 0) fallbackKey(room) else keyFallback.putIfAbsent(room, run.t + cfg.keyFallbackTicks) }
+    }
+
+    /** A key room's key with no kill to give it to: dropped at the room's middle and taken by whoever is in the room, if anyone is. */
+    private fun fallbackKey(room: Int) {
+        val (x, z) = centre(room); dropKey(room, x, z)
+        // Left lying, a key in a miniboss room without its miniboss held up every door after it until someone happened past (120 ticks in a replay).
+        val stand = stands.values.firstOrNull { it.room == room }
+        val who = state.rooms.getOrNull(room)?.occupants?.firstOrNull { canPick(it) }
+        if (stand != null && who != null) pickUp(stand, who)
     }
 
     private fun scheduleSynth(room: Int) {
@@ -322,7 +390,7 @@ class StateController(val run: Run, val rules: StateRules, val cfg: StateConfig,
         bloodGreenAt?.let { at -> if (t >= at) greenBlood() }
         for ((room, at) in keyFallback.entries.toList()) if (t >= at) {
             keyFallback.remove(room)
-            if (ledger.pending(room) != null) { val (x, z) = centre(room); dropKey(room, x, z) }
+            if (ledger.pending(room) != null) fallbackKey(room)
         }
     }
 
@@ -489,7 +557,7 @@ class StateController(val run: Run, val rules: StateRules, val cfg: StateConfig,
                 DoorPhase.CLOSED -> {}
             }
         }
-        fx.clearStands(); stands.clear()
+        fx.clearStands(); stands.clear(); botPickups.clear()
         for (j in o.getAsJsonArray("stands").orEmpty()) {
             val s = j.asJsonObject
             val kind = KeyKind.valueOf(s["kind"].asString)
@@ -501,12 +569,15 @@ class StateController(val run: Run, val rules: StateRules, val cfg: StateConfig,
     }
 
     /** Removes the world things this controller made (key stands). The doors are the layout's. */
-    fun end() { fx.clearStands(); stands.clear() }
+    fun end() { fx.clearStands(); stands.clear(); botPickups.clear() }
 
     /** The stands on the floor now (dev command, tests). */
     fun standList(): List<KeyStand> = stands.values.toList()
 
     companion object {
+        /** A replay: keys drop and are taken on the recorded ticks only (no drop on a kill, no pickup by coming close). */
+        @Volatile @JvmStatic var keysFromRecording = false
+
         /** Room types whose objective is a mob kill. Puzzles have their own solver; the entrance, Fairy and blood rooms their own rules. */
         private val MOB_TYPES = setOf(RoomType.NORMAL, RoomType.TRAP, RoomType.YELLOW, RoomType.RARE)
 

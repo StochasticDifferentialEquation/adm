@@ -28,6 +28,7 @@ import net.minecraft.world.entity.Entity
 import net.minecraft.world.entity.LivingEntity
 import java.util.UUID
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.random.Random
 
 /**
@@ -92,10 +93,14 @@ object DamageModule : AdsModule, DamageService {
         blastS = host.registerSetting(NumberSetting("Clear Blast Damage", 3000, 50..20000, 50, unit = "k", desc = "In a full run: the HP an Explosive Shot blast or a Guided Sheep takes off each mob within 3 blocks (thousands). Not measured on Hypixel."))
         implosionS = host.registerSetting(NumberSetting("Implosion Damage", 100, 10..400, 5, unit = "%", desc = "In a full run: scales the floor's measured Implosion damage per mob (F7 25.4M, M7 56.6M). 100 is your recorded gear; on M7 lower values need more casts per mob."))
         regenS = host.registerSetting(NumberSetting("Clear Health Regen", 23, 0..100, 1, unit = " per 10 s", desc = "In a full run: percent of max health that comes back every 10 seconds, in a step every second (23 means 2.3 percent a second, the middle of what Hypixel shows: 1.3 to 3.5)."))
+        numbersS = host.registerSetting(NumberSetting("Damage Numbers", DamageNumbers.DEFAULT_CHANCE, 0..100, 1, unit = "%", desc = "In a full run: the share of hits on a mob that float a damage number over it for a second (grey, or a coloured ✧crit✧). On Hypixel every hit by every player gets one."))
         shieldS = host.registerSetting(NumberSetting("Wither Shield Size", 93, 0..200, 1, unit = "%", desc = "In a full run: how much damage a Hyperion cast's Wither Shield soaks, in percent of your max health. Not measured on Hypixel."))
     }
 
     // ---- state ----------------------------------------------------------------------------------------------------
+
+    private lateinit var numbersS: NumberSetting<Int>
+    private var numberRolls: Random = Random(0)
 
     private val mobLedger = MobDamageLedger()
     private var rolls: Random = Random(0)
@@ -123,12 +128,21 @@ object DamageModule : AdsModule, DamageService {
     /** The run to hurt things in: a dungeon-stage run that is not over (the boss stage keeps its own damage). */
     fun activeRun(): Run? = Runs.current?.takeIf { !it.isOver && it.stage.inDungeon }
 
+    /** The Grandma Wolf Kill Combo of each human. */
+    private val combo = KillCombo()
+    /** Whether the humans have the pet (a replay of someone without it has no Kill Combo lines). */
+    @Volatile var killCombo = true
+
     override fun onRunStart(run: Run) {
+        combo.clear()
         mobLedger.clear(); regenCarry.clear(); shown.clear(); shields.clear(); dealt.clear(); milestonesShown.clear(); reviving.clear()
         rolls = run.subRandom("damage")
+        numberRolls = run.subRandom("damage.numbers")
+        ClassAbilities.reset()
     }
 
     override fun onRunEnd(run: Run, reason: EndReason) {
+        ClassAbilities.reset()
         mobLedger.clear(); regenCarry.clear(); shields.clear(); dealt.clear(); milestonesShown.clear(); reviving.clear()
         EngineerClient.safely("ads damage end") {
             Masks.stopped()
@@ -138,12 +152,17 @@ object DamageModule : AdsModule, DamageService {
     }
 
     override fun restore(run: Run, data: JsonObject) {
+        ClassAbilities.reset()
         mobLedger.clear(); regenCarry.clear(); shown.clear(); shields.clear(); dealt.clear(); milestonesShown.clear(); reviving.clear()
         // A ghost the savepoint says is alive comes back with the rest of the party.
         for (rec in run.state.players.values) if (!rec.ghost) human(rec.uuid)?.let { p -> Sim.asPlayer(p) { if (Masks.ghost) Masks.reviveGhost(p, null) } }
     }
 
     override fun onEvent(run: Run, event: com.engineerclient.p3sim.run.RunEvent) {
+        if (event is com.engineerclient.p3sim.run.MobKilled && killCombo) event.by?.let { id ->
+            val p = human(id) ?: return@let
+            combo.kill(id, run.t)?.let { line -> EngineerClient.safely("ads kill combo") { Sim.asPlayer(p) { Sim.chat(line) } } }
+        }
         // The Dungeonbreaker gains 5 charges for each secret its finder collects.
         if (event is com.engineerclient.p3sim.run.SecretFound) event.player?.let { id ->
             human(id)?.let { p -> EngineerClient.safely("ads damage breaker charges") { Sim.asPlayer(p) { com.engineerclient.p3sim.SimItems.addBreakerCharges(BREAKER_CHARGES_PER_SECRET) } } }
@@ -158,6 +177,8 @@ object DamageModule : AdsModule, DamageService {
     override fun onTick(run: Run) {
         if (!run.stage.inDungeon) return
         val t = run.t
+        EngineerClient.safely("ads class abilities") { ClassAbilities.tick(run) }
+        for ((id, line) in combo.expire(t)) if (line != null) human(id)?.let { p -> EngineerClient.safely("ads kill combo") { Sim.asPlayer(p) { Sim.chat(line) } } }
         for (rec in run.state.players.values.toList()) {
             if (PlayerLedger.reviveDue(rec, t)) { reviving.remove(rec.uuid); revive(run, rec.uuid, null); continue }
             val r = reviving[rec.uuid]
@@ -225,16 +246,25 @@ object DamageModule : AdsModule, DamageService {
         return e.entityTags().contains(ASLEEP_TAG)
     }
 
-    override fun hurtMob(run: Run, mob: UUID, amount: Double, source: DamageSource, by: UUID?): Boolean {
+    override fun hurtMob(run: Run, mob: UUID, asked: Double, source: DamageSource, by: UUID?): Boolean {
         if (!run.stage.inDungeon) return false
         val rec = Services.mobs.mob(mob) ?: return false
+        val replayed = replayHit?.invoke(mob, by)
+        val amount = replayed ?: asked
         if (!rec.alive || amount <= 0.0 || amount.isNaN()) return false
         // A sleeping Fels cannot be hurt, except by a teammate bot (it wakes it, as a body next to it would).
         if (asleep(rec) && by?.let { run.state.players[it]?.isBot } != true) return false
         // For now every hit kills (no damage maths in the clear yet): the mob takes all it has left.
-        val left = if (oneShot) 0.0 else max(0.0, rec.hp - amount)
+        val left = if (oneShot && replayed == null) 0.0 else max(0.0, rec.hp - amount)
         mobLedger.record(mob, amount, source, by)
-        if (by != null) addDealt(run, by, amount)
+        // The milestones count the health a hit took, not the hit: a 69 million Implosion on three mobs of about a million each is
+        // Hypixel's first milestone (750,000), not its fifth (DR, a Mage's run: ❶ on that cast, ❷ 18 ticks later, ❸ at 11 s).
+        if (by != null) addDealt(run, by, min(amount, rec.hp), source)
+        val numbers = if (::numbersS.isInitialized) numbersS.value else DamageNumbers.DEFAULT_CHANCE
+        if (numbers > 0 && numberRolls.nextInt(100) < numbers) EngineerClient.safely("ads damage number") {
+            val e = rec.entityId?.let { Sim.level.getEntity(it) }
+            if (e != null) DamageNumbers.show(e.x, e.y, e.z, amount, numberRolls)
+        }
         val after = Services.mobs.setHp(run, mob, left, by)
         // The kill counts only when the mob really died (the mobs module may have refused or lost it), so the count matches the MobKilled events.
         if (left <= 0.0 && after?.alive == false) {
@@ -248,21 +278,25 @@ object DamageModule : AdsModule, DamageService {
     }
 
     /** Adds to [by]'s damage total and prints the class milestone lines it crosses (several can fire in one tick). */
-    private fun addDealt(run: Run, by: UUID, amount: Double) {
+    private fun addDealt(run: Run, by: UUID, amount: Double, source: DamageSource) {
         val rec = run.state.players[by] ?: return
+        // An Archer's milestones count "Ranged Damage" (their line says so): a Hyperion's Implosion or a sword hit is not.
+        if (rec.dungeonClass.equals("archer", true) && source != DamageSource.BOW && source != DamageSource.PROJECTILE) return
         val total = (dealt[by] ?: 0.0) + amount
         dealt[by] = total
         val cls = rec.dungeonClass ?: return
-        val doubled = cls.equals("mage", true) && run.state.players.values.count { it.dungeonClass.equals("mage", true) } > 1
-        val table = ClassMilestones.thresholds(cls, doubled) ?: return
+        val table = ClassMilestones.thresholds(cls) ?: return
         val shownSoFar = milestonesShown[by] ?: 0
         val now = ClassMilestones.reached(table, total)
         if (now <= shownSoFar) return
         milestonesShown[by] = now
         val sp = human(by) ?: return
-        val seconds = maxOf(0, run.t / 20)
+        val seconds = com.engineerclient.p3sim.clear.secrets.Blessings.seconds(run.t)
         for (i in shownSoFar until now) Sim.asPlayer(sp) { Sim.chat(ClassMilestones.line(cls, i, table, seconds)) }
     }
+
+    /** A replay's damage for a hit: the HP the recording's mob lost then (null: not the replay's hit to say, 0: Hypixel shows no loss then). */
+    @Volatile var replayHit: ((UUID, UUID?) -> Double?)? = null
 
     /** Every hit on a clear mob kills it (the damage numbers are not modelled yet). */
     @Volatile var oneShot = true

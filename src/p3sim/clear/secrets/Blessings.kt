@@ -31,13 +31,18 @@ object Blessings {
     /** Share of the V lines a teammate sees that carry the `(Ns)` clock (18.6 percent of all lines were timed V, 35.4 percent were V). */
     const val OBSERVER_TIMED_SHARE_OF_V = 0.525
     /**
-     * Hypixel runs a date-wide state where every grant is 25 percent stronger (all of the grants on two recorded days, none on most
-     * others), so it is not random per grant: [BOOST] applies to flat, multiplier and the speed and damage terms when the setting is on
-     * (`Blessing boost x1.25`, default off). Whether Speed and Damage scale too is UNMEASURED.
+     * Hypixel runs a date-wide state where every grant is 25 percent stronger (all 42 recorded runs of two days, none of the 97 of the
+     * others, never mixed in a run), so it is not random per grant: [BOOST] applies to the flat and multiplier terms when the setting is
+     * on (`Blessing boost x1.25`, default off). Wisdom's Speed and Stone's Damage stay as they are (+24 Speed, +36 Damage at V boosted).
      */
     const val BOOST = 1.25
     const val FLAT_PER_LEVEL = 5.8
     const val MULT_PER_LEVEL = 0.03
+    /**
+     * A boosted day's multiplier step per level (not 0.03 x 1.25): the recorded boosted lines read +1.04x at I, +1.07x at II and +1.18x
+     * at V (Power, Stone, Wisdom and Time alike), which puts the step in [0.035, 0.037); 0.036 prints all three. Life's does scale by 1.25.
+     */
+    const val BOOSTED_MULT_PER_LEVEL = 0.036
     const val LIFE_MULT_PER_LEVEL = 0.0436
     const val WISDOM_SPEED_PER_LEVEL = 4.8
     const val STONE_DAMAGE_PER_LEVEL = 7.2
@@ -60,6 +65,16 @@ object Blessings {
     /** The type of a secret chest's blessing. */
     fun pickChest(random: Random): Blessing = draw(CHEST_WEIGHTS, random, Blessing.LIFE)
 
+    /**
+     * A blessing a dying mob drops (ADR, 1,178 pickups in 250 runs, 4.7 a run, every one level V with the run clock): Power 34 percent,
+     * Life 31, Wisdom 21, Stone 13. 61 percent print `A Blessing of X was picked up!` and `A Blessing of X V was found! (Ns)` with no name;
+     * the rest `<rank> <name> has obtained Blessing of X!` and the finder's `You found` / `<name> found a Blessing of X V! (Ns)`.
+     */
+    private val KILL_WEIGHTS = listOf(Blessing.POWER to 402, Blessing.LIFE to 370, Blessing.WISDOM to 252, Blessing.STONE to 154)
+    const val KILL_PICKED_UP_SHARE = 0.61
+
+    fun pickKill(random: Random): Blessing = draw(KILL_WEIGHTS, random, Blessing.POWER)
+
     /** The level a secret chest's blessing shows (I, II or V); Time is always V. */
     fun chestLevel(b: Blessing, random: Random): Int {
         var n = random.nextInt(CHEST_LEVEL_WEIGHTS.sumOf { it.second })
@@ -78,11 +93,15 @@ object Blessings {
 
     fun roman(level: Int): String = when (level) { 1 -> "I"; 2 -> "II"; 3 -> "III"; 4 -> "IV"; 5 -> "V"; else -> level.toString() }
 
-    /** `24s` below a minute, `01m 16s` after (the run clock, as the line prints it). */
-    fun clock(ticks: Int): String {
-        val s = (ticks / 20).coerceAtLeast(0)
-        return if (s < 60) "${s}s" else "%02dm %02ds".format(s / 60, s % 60)
-    }
+    /** The run clock as the line prints it (`03s`, `01m 16s`). */
+    fun clock(ticks: Int): String = com.engineerclient.p3sim.clear.damage.ClassMilestones.clock(seconds(ticks))
+
+    /**
+     * Seconds on Hypixel's run clock at run tick [ticks]. Measured over 131 DR runs: the clock runs on real time (about 1% ahead of
+     * the ticks), and its start sits 14 ticks before to 18 after tick 0, most often [CLOCK_LEAD] ticks before.
+     */
+    fun seconds(ticks: Int): Int = ((ticks + CLOCK_LEAD) / 20).coerceAtLeast(0)
+    const val CLOCK_LEAD = 2
 
     /** A teammate's find shows at level I, II or V by [OBSERVER_LEVEL_WEIGHTS]. */
     fun observerLevel(random: Random): Int {
@@ -119,7 +138,7 @@ object Blessings {
 
     /** One `+flat & +multx <tail>` term. */
     private fun term(level: Int, tail: String, boost: Double): String =
-        "§r§a+${fmt(FLAT_PER_LEVEL * level * boost)}§r§7 & §r§a+${mult(1.0 + MULT_PER_LEVEL * level * boost)}x $tail"
+        "§r§a+${fmt(FLAT_PER_LEVEL * level * boost)}§r§7 & §r§a+${mult(1.0 + (if (boost != 1.0) BOOSTED_MULT_PER_LEVEL else MULT_PER_LEVEL) * level)}x $tail"
 
     /**
      * The "Granted you ..." lines that follow the headline, indented five spaces as Hypixel prints them. Power is two lines, the others one.
@@ -136,8 +155,8 @@ object Blessings {
                 val m = mult(1.0 + LIFE_MULT_PER_LEVEL * level * boost)
                 listOf(pre + "§r§a+${m}x HP §r§7and §r§a+${m}x §r§c$G_REGEN Health Regen§r§7.")
             }
-            Blessing.WISDOM -> listOf(pre + term(level, "§r§b$G_INTELLIGENCE Intelligence", boost) + " §r§7and §r§a+${fmt(WISDOM_SPEED_PER_LEVEL * level * boost)} §r§f$G_SPEED Speed§r§7.")
-            Blessing.STONE -> listOf(pre + term(level, "$G_DEFENSE Defense", boost) + " §r§7and §r§a+${fmt(STONE_DAMAGE_PER_LEVEL * level * boost)} §r§c$G_DAMAGE Damage§r§7.")
+            Blessing.WISDOM -> listOf(pre + term(level, "§r§b$G_INTELLIGENCE Intelligence", boost) + " §r§7and §r§a+${fmt(WISDOM_SPEED_PER_LEVEL * level)} §r§f$G_SPEED Speed§r§7.")
+            Blessing.STONE -> listOf(pre + term(level, "$G_DEFENSE Defense", boost) + " §r§7and §r§a+${fmt(STONE_DAMAGE_PER_LEVEL * level)} §r§c$G_DAMAGE Damage§r§7.")
             Blessing.TIME -> listOf(
                 pre + term(level, "HP", boost) + "§r§7, " + term(level, "$G_DEFENSE Defense", boost) + "§r§7, " +
                     term(level, "§r§b$G_INTELLIGENCE Intelligence", boost) + "§r§7, and " + term(level, "§r§c$G_STRENGTH Strength", boost) + "§r§7.",

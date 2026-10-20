@@ -65,9 +65,10 @@ class PlanExecutorTest {
         val w = FakeWorld(); w.keys = false
         val ex = PlanExecutor(p, w)
         val door = p.doors.values.minBy { it.openT }
+        val theDoor = door.door
         var calls = 0
         val counting = object : BotWorld by w {
-            override fun openDoor(seat: Int, door: Int): Boolean { calls++; return w.openDoor(seat, door) }
+            override fun openDoor(seat: Int, door: Int): Boolean { if (door == theDoor) calls++; return w.openDoor(seat, door) }
         }
         val ex2 = PlanExecutor(p, counting)
         for (t in 0..door.openT + 100) ex2.tick(t)
@@ -76,6 +77,23 @@ class PlanExecutorTest {
         ex2.tick(door.openT + 105)
         assertTrue(w.log.any { it.startsWith("open ${door.door}") })
         assertTrue(ex.pending().isNotEmpty())
+    }
+
+    @Test fun aWaitingDoorOpensSoonAfterTheKeyIsTaken() {
+        val p = plan()
+        val w = FakeWorld(); w.keys = false
+        val ex = PlanExecutor(p, w)
+        val door = p.doors.values.minBy { it.openT }
+        for (t in 0..door.openT) ex.tick(t)
+        assertTrue(w.log.none { it.startsWith("open ${door.door}") })
+        // The key comes one tick after a failed try: without the hook the next try would be 5 ticks after that one.
+        w.keys = true
+        val kt = door.openT + 1
+        ex.keyArrived(kt)
+        ex.tick(kt); ex.tick(kt + 1)
+        assertTrue(w.log.none { it.startsWith("open ${door.door}") }, "not before the reaction")
+        ex.tick(kt + PlanExecutor.KEY_REACTION_TICKS)
+        assertTrue(w.log.any { it.startsWith("open ${door.door}") }, "opened ${PlanExecutor.KEY_REACTION_TICKS} ticks after the key")
     }
 
     /** One bot walking from (0,0) to (60,0) over 100 ticks, with a door at the far end that it is to open at tick 30. */

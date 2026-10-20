@@ -34,7 +34,7 @@ import java.util.UUID
  * rooms that disable abilities.
  *
  * Every room whose design lists crushers or tripwires (the two trap rooms and a few dozen ordinary rooms with one of the two) gets a
- * [RoomHazards] clock that runs while a human is inside. The crushers are written as blocks through the room's placement and grow as arms of
+ * [RoomHazards] clock that runs while a player (a bot too) is inside. The crushers are written as blocks through the room's placement and grow as arms of
  * layers; a player inside an arm takes 30 percent of max HP, and a player who touches a tripwire in one of the rooms where real strings were
  * seen to hit ([TrapTimings.tripwireHurtRooms]) takes 15 percent as true damage (`DamageSource.TRAP`) at once, with Hypixel's
  * "The Tripwire Trap hit you for N damage!" line. Strings in every other room only flip their hooks.
@@ -66,11 +66,25 @@ object TrapsModule : AdsModule, TrapService {
 
     /** One room with hazards, in a run. */
     private class Entry(val room: PlacedRoom, val placement: Placement, val hazards: RoomHazards, val banks: List<ArrowBank> = emptyList(), val wake: DoubleArray? = null) {
-        /** The arrow banks' own clock: it runs while a human is inside [wake] (the world box x0, z0, x1, z1 around the dispensers, grown by the arrow range), not only inside the room. */
+        /** The arrow banks' own clock: it runs while a player (a bot too) is inside [wake] (the world box x0, z0, x1, z1 around the dispensers, grown by the arrow range), not only inside the room. */
         var bankClock = 0
     }
 
     private var entries: List<Entry> = emptyList()
+
+    /**
+     * While a replay runs the recording moves the crushers (a teammate ADS cannot see kept a room going on Hypixel): the arms keep their clocks,
+     * their hits and their sounds, but the blocks are the recording's.
+     */
+    @Volatile var recordingMovesCrushers = false
+
+    /** Whether the canonical cell is in the reach of one of [e]'s crushers. */
+    private fun inArm(e: Entry, x: Int, y: Int, z: Int): Boolean = e.hazards.crushers.any { c ->
+        val b = c.armBox(c.sweep); x in b[0]..b[3] && y in b[1]..b[4] && z in b[2]..b[5]
+    }
+
+    /** Whether the world cell is in the reach of a crusher of this run. */
+    fun isCrusherCell(x: Int, y: Int, z: Int): Boolean = entries.any { e -> e.placement.toCanonical(x, z)?.let { (cx, cz) -> inArm(e, cx, y, cz) } == true }
     private var sites: TrapSites = TrapSites.NONE
     private var humanIds: Set<UUID> = emptySet()
     private val arrowHits = ArrayList<UUID>()
@@ -91,9 +105,19 @@ object TrapsModule : AdsModule, TrapService {
             val arrowRules = sites.arrows.filter { it.design == design.id }
             val flameRules = sites.flames.filter { it.design == design.id }
             if (design.crushers.isEmpty() && design.tripwires.isEmpty() && arrowRules.isEmpty() && flameRules.isEmpty()) return@mapNotNull null
-            val crushers = design.crushers.map {
+            val crushers = design.crushers.flatMap {
                 val t = plan.timing(it.id)
-                Crusher(it.id, it.slab, it.axis?.firstOrNull() ?: 'x', it.sign, t.sweep ?: it.sweep, it.material ?: "minecraft:polished_granite", t, plan.startAt(it.id))
+                val axis = it.axis?.firstOrNull() ?: 'x'
+                val sweep = t.sweep ?: it.sweep
+                val mat = it.material ?: "minecraft:polished_granite"
+                if (!t.pincer) listOf(Crusher(it.id, it.slab, axis, it.sign, sweep, mat, t, plan.startAt(it.id)))
+                else {
+                    // The far arm's home is the cell past the sweep, and it grows back towards this one.
+                    val d = it.sign * (sweep + 1)
+                    val far = it.slab.copyOf().also { b -> if (axis == 'x') { b[0] += d; b[3] += d } else { b[2] += d; b[5] += d } }
+                    listOf(Crusher(it.id, it.slab, axis, it.sign, sweep / 2, mat, t, plan.startAt(it.id)),
+                        Crusher(it.id + "/far", far, axis, -it.sign, sweep - sweep / 2, mat, t, plan.startAt(it.id)))
+                }
             }
             val lines = TripLine.pair(design.tripwires.map { Hook(it.pos.x, it.pos.y, it.pos.z, it.facing ?: "") })
             val hurts = timings.tripwiresHurtIn(room.name)
@@ -143,7 +167,13 @@ object TrapsModule : AdsModule, TrapService {
         if (entries.isEmpty()) return ctx.reply("This layout has no room with crushers, tripwires, arrow banks or flamethrowers.")
         when (ctx.arg(0)) {
             "list", null -> for (e in entries) ctx.reply("room ${e.room.index}: ${e.room.name} (${e.room.type}) ${e.hazards.crushers.size} crushers, ${e.hazards.lines.size} tripwires, " +
-                "${e.banks.size} arrow banks, ${e.hazards.extras.count { it is FlameBank }} flamethrower groups")
+                "${e.banks.size} arrow banks, ${e.hazards.extras.count { it is FlameBank }} flamethrower groups").also {
+                for (c in e.hazards.crushers) {
+                    val b = c.armBox(c.sweep); val p = e.placement.toWorld(b[0], b[1], b[2]); val q = e.placement.toWorld(b[3], b[4], b[5])
+                    val h = e.placement.toWorld(c.slab[0], c.slab[1], c.slab[2])
+                    ctx.reply("  ${c.id}: arm ${minOf(p.x, q.x)}..${maxOf(p.x, q.x)} ${p.y}..${q.y} ${minOf(p.z, q.z)}..${maxOf(p.z, q.z)}, home at ${h.x} ${h.y} ${h.z}, sweep ${c.sweep}, ${c.timing.ticksPerBlock}/${c.timing.stillTicks}")
+                }
+            }
             "status" -> for (e in entries) ctx.reply("room ${e.room.index}: clock ${e.hazards.clock}, crushers out " + e.hazards.crushers.joinToString { "${it.id.substringAfter('/')}=${it.extensionAt(e.hazards.clock)}/${it.sweep}" } +
                 e.hazards.extras.filterIsInstance<FallingFloor>().joinToString("") { ", floor of ${it.cells.size} blocks ${if (it.fired) "gone" else "standing"}" } +
                 (if (e.banks.isEmpty()) "" else ", bank clock ${e.bankClock}, banks " + e.banks.joinToString { "${it.rule.dispensers.size}x${it.rule.perDispenser} every ${it.rule.period} (phase ${it.phase})" }))
@@ -178,7 +208,9 @@ object TrapsModule : AdsModule, TrapService {
     override fun onTick(run: Run) {
         if (run.stage != RunStage.CLEAR && run.stage != RunStage.BLOOD) return
         if (entries.isEmpty()) return
-        val humans = run.state.players.values.filter { !it.isBot && !it.ghost }
+        // Teammates run a room's hazards as much as you do (ADR: a crusher kept moving while only a teammate was in its room, 1,100 ticks after the
+        // recorder had left it), so bots count for the clocks; only people are hurt (the bots' damage is on their own schedule).
+        val present = run.state.players.values.filter { !it.ghost }
         humanIds = run.state.players.values.filter { !it.isBot }.mapTo(HashSet()) { it.uuid }
         // Arrows that hit a human since the last tick.
         if (arrowHits.isNotEmpty()) {
@@ -186,22 +218,22 @@ object TrapsModule : AdsModule, TrapService {
             for (id in ids) strike(run, HazardHit(id, HazardKind.ARROW))
         }
         for (e in entries) {
-            val inside = humans.mapNotNull { p ->
+            val inside = present.mapNotNull { p ->
                 if (run.state.roomAt(p.x, p.z)?.index != e.room.index) return@mapNotNull null
                 val c = Frames.toCanonical(e.placement, p.x, p.z) ?: return@mapNotNull null
                 PlayerPos(p.uuid, c.first, p.y, c.second)
             }
             if (inside.isNotEmpty()) {
                 val r = e.hazards.tick(inside)
-                handle(run, e, r.edits, r.hits, r.cues, r.debris, r.volleys, r.flames)
+                handle(run, e, r.edits, r.hits.filter { it.player in humanIds }, r.cues, r.debris, r.volleys, r.flames)
             }
-            // The arrow banks beat on their own clock while a human is near enough to see them, in the room or beside it.
+            // The arrow banks beat on their own clock while a player is near enough to see them, in the room or beside it.
             val w = e.wake
-            if (w != null && humans.any { it.x >= w[0] && it.x <= w[2] && it.z >= w[1] && it.z <= w[3] }) {
+            if (w != null && present.any { it.x >= w[0] && it.x <= w[2] && it.z >= w[1] && it.z <= w[3] }) {
                 e.bankClock++
                 val out = HazardOut()
                 for (b in e.banks) b.tick(e.bankClock, emptyList(), out)
-                handle(run, e, out.edits, out.hits, out.cues, out.debris, out.volleys, out.flames)
+                handle(run, e, out.edits, out.hits.filter { it.player in humanIds }, out.cues, out.debris, out.volleys, out.flames)
             }
         }
     }
@@ -209,7 +241,8 @@ object TrapsModule : AdsModule, TrapService {
     /** Does what a room's hazards asked for this tick: writes the blocks, turns floor cells to debris, plays the sounds, shoots the arrows, draws the flames and hurts. */
     private fun handle(run: Run, e: Entry, edits: List<BlockEdit>, hits: List<HazardHit>, cues: List<SoundCue>, debris: List<IntArray>, volleys: List<ArrowRule>, flames: List<FlameFx>) {
         if (debris.isNotEmpty()) spawnDebris(e, debris)
-        if (edits.isNotEmpty()) HardBlocks.apply(e.placement, edits)
+        val mine = if (recordingMovesCrushers) edits.filter { !inArm(e, it.x, it.y, it.z) } else edits
+        if (mine.isNotEmpty()) HardBlocks.apply(e.placement, mine)
         for (cue in cues) play(e, cue)
         for (rule in volleys) fire(e, rule)
         for (fx in flames) draw(e, fx)

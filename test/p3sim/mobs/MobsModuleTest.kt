@@ -55,6 +55,8 @@ class MobsModuleTest {
         override fun position(e: MobEntry): DoubleArray? = if (e.live) doubleArrayOf(e.x, e.y, e.z) else null
         override fun act(e: MobEntry, action: AiAction, targetY: Double, targetX: Double, targetZ: Double) { acts += action }
         override fun rescue(e: MobEntry) {}
+        val placed = ArrayList<DoubleArray>()
+        override fun place(e: MobEntry, x: Double, y: Double, z: Double) { placed += doubleArrayOf(x, y, z); e.x = x; e.y = y; e.z = z }
     }
 
     private class FakeDoors(val key: KeyKind?) : DoorService {
@@ -252,6 +254,24 @@ class MobsModuleTest {
         assertFalse(MobsModule.isAsleep(f.id))
     }
 
+    @Test fun aReplayedMobGoesWhereTheRecordingHasItAndDoesNothingOfItsOwn() {
+        val run = newRun()
+        val m = spawn(run, "test_boss", x = 10.0, z = 10.0)
+        val p = human(run, 11.0, 10.0)
+        MobsModule.replayPose = { id -> if (id == m.id) doubleArrayOf(12.0, 70.0, 14.0) else null }
+        try {
+            tick(run, 30)
+            assertTrue(stage.acts.isEmpty(), "no AI step")
+            assertTrue(damage.melee.isEmpty(), "no swing at the human beside it")
+            assertEquals(listOf(12.0, 70.0, 14.0), stage.placed.last().toList())
+            assertEquals(14.0, m.z)
+        } finally { MobsModule.replayPose = null }
+        // Out of the recording's sight: ADS moves it again.
+        p.x = 13.0
+        tick(run, 30)
+        assertTrue(stage.acts.isNotEmpty())
+    }
+
     @Test fun aMoverChasesAndHitsAHuman() {
         val run = newRun()
         // test_boss is a patrol miniboss; with no loop it stands until a player is close, then chases and swings.
@@ -279,9 +299,9 @@ class MobsModuleTest {
         val run = newRun()
         val m = spawn(run, "test_archer", x = 10.0, z = 10.0)
         val p = human(run, 18.0, 10.0)
-        // A static archer only reacts to a close player; make it a mover by asking for a patrol-less miniboss-like state: use the sleeper-free path.
+        // A standing archer shoots what it sees within range (1.8: the first shot one interval after it draws, 24 ticks at point blank).
         p.x = 11.0
-        tick(run, 10)   // adjacent: the standing mob hits (melee swing)
+        tick(run, 30)
         assertTrue(damage.melee.isNotEmpty() || damage.hurt.isNotEmpty())
         assertNotNull(m)
     }
@@ -293,7 +313,8 @@ class MobsModuleTest {
         tick(run, 10)
         assertTrue(stage.calls.none { it.startsWith("reveal") })
         run.state.players.values.single().x = 20.0
-        tick(run, 2)
+        // It looks for a target one tick in ten (1.8).
+        tick(run, 80)
         assertTrue(stage.calls.contains("reveal test_assassin"))
     }
 

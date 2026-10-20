@@ -71,6 +71,7 @@ object MobsModule : AdsModule, MobService {
     private var sPartial: NumberSetting<Double>? = null
     private var sMinibossChance: NumberSetting<Int>? = null
     private var sMoverShare: NumberSetting<Int>? = null
+    private var sStroll: BooleanSetting? = null
     private var sAggro: NumberSetting<Double>? = null
     private var sLose: NumberSetting<Double>? = null
     private var sMeleeReach: NumberSetting<Double>? = null
@@ -92,17 +93,18 @@ object MobsModule : AdsModule, MobService {
         sHealthData = host.registerSetting(BooleanSetting("Mobs Health Data", true, desc = "Writes a mob's HP into its body's health data too (Hypixel does), so recorders that read the entity data agree with the name tag."))
         sAttacks = host.registerSetting(BooleanSetting("Mobs Attack", true, desc = "Mobs that reach you hit you (through the damage ledger). Off: they walk and shoot at nothing."))
         sSpawnDistance = host.registerSetting(NumberSetting("Mobs Spawn Distance", 48, 16..160, 4, unit = " blocks", desc = "A room's mobs appear once a player is this close (recorded Hypixel bodies first appear at a median of 41 blocks, 85 percent within 3 chunks)."))
-        sMinibossChance = host.registerSetting(NumberSetting("Mobs Miniboss Chance", 50, 0..100, 5, unit = "%", desc = "How often a miniboss room really holds its miniboss (not measured: recordings show about half; a run has about one)."))
+        sMinibossChance = host.registerSetting(NumberSetting("Mobs Miniboss Chance", 65, 0..100, 5, unit = "%", desc = "How often an ordinary room that can hold a miniboss really does (Dungeon Recorder: 65 percent). Yellow miniboss rooms always hold theirs."))
         sWakeRadius = host.registerSetting(NumberSetting("Mobs Wake Radius", 9.0, 1.0..16.0, 0.5, unit = " blocks", desc = "A sleeping Fels wakes when a player's body comes this close, in 3D (measured about 9, always awake at 8; only a body wakes it, not arrows or Implosion)."))
         sPartial = host.registerSetting(NumberSetting("Mobs Partial Weight", 0.25, 0.0..1.0, 0.05, desc = "How often a room replays a recording that only caught part of the room (fewer than half the usual stars), relative to a full one."))
-        sMoverShare = host.registerSetting(NumberSetting("Mobs Mover Share", 40, 0..100, 5, unit = "%", desc = "Share of ordinary mobs that walk toward a player who comes close. Recordings: 33 to 45 percent of mobs seen 2 to 12 blocks away move."))
-        sAggro = host.registerSetting(NumberSetting("Mobs Aggro Radius", 12.0, 2.0..40.0, 1.0, unit = " blocks", desc = "A walking mob starts after a player closer than this (not measured)."))
-        sLose = host.registerSetting(NumberSetting("Mobs Lose Radius", 28.0, 4.0..80.0, 1.0, unit = " blocks", desc = "A chasing mob gives up when every player is farther than this (not measured)."))
-        sMeleeReach = host.registerSetting(NumberSetting("Mobs Melee Reach", 2.3, 1.0..6.0, 0.1, unit = " blocks", desc = "How close a mob must be to hit (not measured)."))
-        sMeleeCadence = host.registerSetting(NumberSetting("Mobs Melee Cadence", 20, 5..100, 1, unit = " ticks", desc = "Ticks between one mob's hits (not measured)."))
-        sRangedRange = host.registerSetting(NumberSetting("Mobs Ranged Range", 16.0, 4.0..40.0, 1.0, unit = " blocks", desc = "Skeletons, the Sniper and the Withermancer shoot from at most this far (not measured)."))
-        sRangedCadence = host.registerSetting(NumberSetting("Mobs Ranged Cadence", 40, 10..200, 1, unit = " ticks", desc = "Ticks between one shooter's shots (not measured)."))
-        sStaticReach = host.registerSetting(NumberSetting("Mobs Static Reach", 2.3, 0.0..6.0, 0.1, unit = " blocks", desc = "A mob that stands still still hits a player this close. 0: standing mobs never hit (not measured)."))
+        sMoverShare = host.registerSetting(NumberSetting("Mobs Chaser Share", 0, 0..100, 5, unit = "%", desc = "Share of ordinary mobs that chase a player they see until they reach it. 0 is Hypixel: the Dungeon Recorder shows no chases, only short walks (Mobs Stroll)."))
+        sStroll = host.registerSetting(BooleanSetting("Mobs Stroll", true, desc = "Mobs that do not chase take short walks now and then, more often the nearer you are, a third of them at you (Dungeon Recorder: median 6 blocks; 7 walks a minute within 6 blocks, 1.4 beyond 32). Off: they stand still."))
+        sAggro = host.registerSetting(NumberSetting("Mobs Follow Range", 35.0, 2.0..60.0, 1.0, unit = " blocks", desc = "A walking mob takes as its target a player it can see within this (1.8's follow range; recorded first steps reach p90 32 to 43 blocks)."))
+        sLose = host.registerSetting(NumberSetting("Mobs Give Up Range", 35.0, 4.0..80.0, 1.0, unit = " blocks", desc = "A chasing mob gives up when its target is farther than this, or out of sight for 3 seconds (1.8)."))
+        sMeleeReach = host.registerSetting(NumberSetting("Mobs Hit Reach", 1.43, 1.0..6.0, 0.05, unit = " blocks", desc = "How close a mob must be to hit (1.8's reach for a zombie-sized body; not in the recordings)."))
+        sMeleeCadence = host.registerSetting(NumberSetting("Mobs Melee Cadence", 20, 5..100, 1, unit = " ticks", desc = "Ticks between one mob's hits (1.8's attack timer)."))
+        sRangedRange = host.registerSetting(NumberSetting("Mobs Shot Range", 15.0, 4.0..40.0, 1.0, unit = " blocks", desc = "Skeletons, the Sniper and the Withermancer shoot what they see from at most this far (1.8: 15; recorded shots p90 13.5 blocks)."))
+        sRangedCadence = host.registerSetting(NumberSetting("Mobs Shot Gap", 60, 10..200, 1, unit = " ticks", desc = "Ticks between one shooter's shots at the edge of its range; 20 at point blank, in between by distance (1.8)."))
+        sStaticReach = host.registerSetting(NumberSetting("Mobs Standing Reach", 1.43, 0.0..6.0, 0.05, unit = " blocks", desc = "A mob that stands still still hits a player this close. 0: standing mobs never hit."))
         sZombieSpeed = host.registerSetting(NumberSetting("Mobs Zombie Speed", 0.28, 0.05..1.5, 0.01, unit = " b/tick", desc = "Chase speed of zombie-bodied mobs the speed table has no number for (most archetypes have their own measured one)."))
         sSkeletonSpeed = host.registerSetting(NumberSetting("Mobs Skeleton Speed", 0.137, 0.05..1.5, 0.01, unit = " b/tick", desc = "Chase speed of skeleton-bodied mobs (same source)."))
         sWitherSpeed = host.registerSetting(NumberSetting("Mobs Wither Skeleton Speed", 0.27, 0.05..1.5, 0.01, unit = " b/tick", desc = "Chase speed of the Withermancer (same source; the spread is wide)."))
@@ -119,11 +121,11 @@ object MobsModule : AdsModule, MobService {
     private fun wakeRadius(arch: MobArchetype) = sWakeRadius?.value ?: 9.0
 
     private fun params() = AiParams(
-        moverShare = (sMoverShare?.value ?: 40) / 100.0,
-        aggroRadius = sAggro?.value ?: 12.0, loseRadius = sLose?.value ?: 28.0,
-        meleeReach = sMeleeReach?.value ?: 2.3, meleeCadence = sMeleeCadence?.value ?: 20,
-        rangedRange = sRangedRange?.value ?: 16.0, rangedCadence = sRangedCadence?.value ?: 40,
-        staticReach = sStaticReach?.value ?: 2.3,
+        moverShare = (sMoverShare?.value ?: 0) / 100.0, strolls = sStroll?.value ?: true,
+        aggroRadius = sAggro?.value ?: 35.0, loseRadius = sLose?.value ?: 35.0,
+        meleeReach = sMeleeReach?.value ?: 1.43, meleeCadence = sMeleeCadence?.value ?: 20,
+        rangedRange = sRangedRange?.value ?: 15.0, rangedCadence = sRangedCadence?.value ?: 60,
+        staticReach = sStaticReach?.value ?: 1.43,
         zombieSpeed = sZombieSpeed?.value ?: 0.28, skeletonSpeed = sSkeletonSpeed?.value ?: 0.137, witherSkeletonSpeed = sWitherSpeed?.value ?: 0.27,
         otherSpeed = sOtherSpeed?.value ?: 0.32, patrolSpeed = sPatrolSpeed?.value ?: 0.25,
         assassinTeleportEvery = sTeleportEvery?.value ?: 0,
@@ -161,10 +163,29 @@ object MobsModule : AdsModule, MobService {
     /** The mobs' idle talk (real world only). */
     private val chatter = MobChatter()
     private var chatterRng: Random = Random(0)
+    /** Rolls who looks for a target this tick (1.8: one chance in ten a tick). */
+    private var aiRng: Random = Random(0)
     private val byRoom = HashMap<Int, MutableList<MobEntry>>()
     private val byEntityId = HashMap<Int, MobEntry>()
     private val rolled = HashSet<Int>()
+
+    /** A replay's own mobs for a room (the recording's, as they were), in place of the rolled ones; null for a room it has none for. */
+    @Volatile var roomMobs: ((Run, Int) -> List<PlannedMob>?)? = null
+    /** A replay's HP factor for a room behind a WITHER door (the recording's), in place of the run's drawn one; null for a room it has none for. */
+    /** A replay: where the recording has the mob with this ADS id this tick (x, y, z), or null to let ADS move it. */
+    @Volatile var replayPose: ((java.util.UUID) -> DoubleArray?)? = null
+
+    @Volatile var doorScale: ((Run, Int) -> Double?)? = null
+    /**
+     * The run's drawn HP factor. A room's mobs spawn at their base HP and take a factor the tick after the WITHER door into their room
+     * opens (DR, 139 runs: every scaled mob's HP jumped then and only then; a room reached without a WITHER door never scales, the Blood
+     * door scales nothing). Hypixel's factor is a multiple of 0.05 that grows through the run, near 1 + 0.05 per opened room but not
+     * exactly that (UNKNOWN), so outside a replay the drawn one stands in.
+     */
     private var scale = 1.0
+    /** Rooms a WITHER door has scaled, and those to scale on the next tick. */
+    private val scaledRooms = HashSet<Int>()
+    private val pendingScale = ArrayList<Int>()
     private var noPackSaid = false
     /** MobSpawned events of the start-up roll wait for the first tick: the other modules have not all begun yet while the run starts. */
     private var deferSpawnEvents = false
@@ -173,12 +194,13 @@ object MobsModule : AdsModule, MobService {
     private val spikes = ArrayList<MobEntry>()
 
     private fun reset() {
-        combatTotals.clear(); entries.clear(); byRoom.clear(); byEntityId.clear(); rolled.clear(); scale = 1.0; noPackSaid = false; pendingSpawned.clear(); deferSpawnEvents = false
+        combatTotals.clear(); entries.clear(); byRoom.clear(); byEntityId.clear(); rolled.clear(); scale = 1.0; scaledRooms.clear(); pendingScale.clear(); noPackSaid = false; pendingSpawned.clear(); deferSpawnEvents = false
     }
 
     // ---- the run lifecycle ---------------------------------------------------------------------------------------------
 
     override fun onRunStart(run: Run) {
+        FairyRoom.clear(); RoomDecor.clear()
         discardAll()
         reset()
         val pack = run.packs.mobs
@@ -191,6 +213,7 @@ object MobsModule : AdsModule, MobService {
         val floor = run.config.floor
         scale = run.config.mobHpScale ?: pack.hpScaleFor(floor)?.let { MobRolls.drawHpScale(it, run.subRandom("mobs.scale")) } ?: 1.0
         chatterRng = run.subRandom("mobs.chatter")
+        aiRng = run.subRandom("mobs.ai")
         deferSpawnEvents = true
         for (room in run.plan.rooms) if (room.type != RoomType.ENTRANCE && room.type != RoomType.FAIRY && room.type != RoomType.BLOOD) spawnRoom(run, room.index)
         deferSpawnEvents = false
@@ -208,17 +231,48 @@ object MobsModule : AdsModule, MobService {
     override fun onEvent(run: Run, event: com.engineerclient.p3sim.run.RunEvent) {
         // A game that joins later needs the fake players' info entries before it tracks their bodies.
         if (event is PlayerJoined) stage.announceTo(event.player, entries.values)
+        if (event is com.engineerclient.p3sim.run.DoorOpened && event.kind == com.engineerclient.p3sim.pack.layouts.DoorKind.WITHER)
+            run.plan.doors.getOrNull(event.door)?.let { pendingScale += behind(run, it.roomA, it.roomB) }
+    }
+
+    /** Of the two rooms a door joins, the one farther from the Entrance (counted in doorways). */
+    private fun behind(run: Run, a: Int, b: Int): Int {
+        val start = run.plan.entrance?.index ?: return b
+        val dist = HashMap<Int, Int>()
+        val q = ArrayDeque<Int>(); q += start; dist[start] = 0
+        while (q.isNotEmpty()) {
+            val r = q.removeFirst()
+            for (d in run.plan.doors) if (d.kind.connected) {
+                val o = if (d.roomA == r) d.roomB else if (d.roomB == r) d.roomA else continue
+                if (o !in dist) { dist[o] = dist.getValue(r) + 1; q += o }
+            }
+        }
+        return if ((dist[a] ?: Int.MAX_VALUE) > (dist[b] ?: Int.MAX_VALUE)) a else b
+    }
+
+    /** Puts a room's mobs (HP and max HP) on the WITHER door's factor. */
+    private fun scaleRoom(run: Run, room: Int) {
+        if (!scaledRooms.add(room)) return
+        val f = doorScale?.invoke(run, room) ?: scale
+        if (f == 1.0) return
+        for (e in byRoom[room].orEmpty()) {
+            val r = e.record
+            if (!r.alive) continue
+            r.maxHp = Math.round(r.maxHp * f).toDouble(); r.hp = Math.round(r.hp * f).toDouble()
+            if (e.live) stage.refresh(e)
+        }
     }
 
     override fun onTick(run: Run) {
+        if (pendingScale.isNotEmpty()) { val q = pendingScale.toList(); pendingScale.clear(); for (r in q) scaleRoom(run, r) }
         if (pendingSpawned.isNotEmpty()) { val q = pendingSpawned.toList(); pendingSpawned.clear(); for (m in q) run.bus.post(MobSpawned(run.t, m)) }
         // Nothing stands in the world before the run starts: the first bodies reach a real client at the start tick or up to 30 ticks after it.
         if (run.t < 0) return
         stage.tick()
+        if (stage === RealStage && run.stage.inDungeon && run.stage != RunStage.BOSS_ENTRY && run.stage != RunStage.BOSS) com.engineerclient.EngineerClient.safely("ads fairies") { FairyRoom.tick(run); RoomDecor.tick(run) }
         if (entries.isEmpty() || !stage.available() || run.stage == RunStage.BOSS_ENTRY || run.stage == RunStage.BOSS || run.stage == RunStage.END) return
         val pack = run.packs.mobs ?: return
         val players = run.state.alivePlayers()
-        val humans = players.filter { !it.isBot }
         val t = run.serverTick
         val params = params()
         val maxDist = spawnDistance()
@@ -249,11 +303,19 @@ object MobsModule : AdsModule, MobService {
             }
             stage.rescue(e)
             val pos = stage.position(e) ?: continue
+            // A replay: a mob the recording sees is where the recording has it, and does nothing of its own.
+            val rec = replayPose?.invoke(e.record.id)
+            if (rec != null) {
+                if (e.asleep) { e.asleep = false; stage.wake(e) }
+                stage.place(e, rec[0], rec[1], rec[2])
+                stage.position(e)?.let { e.record.x = it[0]; e.record.y = it[1]; e.record.z = it[2] }
+                continue
+            }
             if (e.asleep) {
                 val r = wakeRadius(e.arch)
                 if (players.any { dist3(it, pos) <= r }) { e.asleep = false; stage.wake(e) } else continue
             }
-            runAi(run, e, pos, pack, humans, params)
+            runAi(run, e, pos, pack, players, params)
             stage.position(e)?.let { e.record.x = it[0]; e.record.y = it[1]; e.record.z = it[2] }
         }
         if (stage === RealStage) com.engineerclient.EngineerClient.safely("ads mob chatter") { chatter.tick(t, entries.values, chatterRng) }
@@ -268,23 +330,31 @@ object MobsModule : AdsModule, MobService {
 
     // ---- AI v0 -------------------------------------------------------------------------------------------------------
 
-    private fun runAi(run: Run, e: MobEntry, pos: DoubleArray, pack: MobPack, humans: List<PlayerRecord>, p: AiParams) {
+    /**
+     * One mob's AI tick. Its target is the nearest living player on its level, a bot as much as a person: real mobs go for whichever teammate is
+     * near (ADR: zombies move 48% of the ticks they are seen, skeletons 67%), and a mob that ignored the bots would stand still in every room they
+     * clear. A bot it reaches is swung at but not hurt here: the bots module hurts bots on the measured schedule of a fighting teammate.
+     */
+    private fun runAi(run: Run, e: MobEntry, pos: DoubleArray, pack: MobPack, targets: List<PlayerRecord>, p: AiParams) {
         val kind = MobPlanner.aiKind(e.arch, p.assassinTeleportEvery > 0)
-        // The nearest living human that is on the mob's level (a mob cannot reach a player several blocks above or below it).
+        // The nearest living player that is on the mob's level (a mob cannot reach a player several blocks above or below it).
         var best: PlayerRecord? = null
         var bestD = Double.MAX_VALUE
-        for (h in humans) {
+        for (h in targets) {
             val dx = h.x - pos[0]; val dz = h.z - pos[2]
             var d = Math.sqrt(dx * dx + dz * dz)
             if (Math.abs(h.y - pos[1]) > 3.0) d += 1000.0
             if (d < bestD) { bestD = d; best = h }
         }
-        val target = best?.let { AiTarget(it.x, it.z, bestD) }
+        // Sight is looked at only when it can matter: a target within the follow range (or the shooting range of a mob that never walks).
+        val reach = if (e.plan.mover) maxOf(p.aggroRadius, p.loseRadius) else maxOf(p.rangedRange, p.staticReach, if (p.strolls) 20.0 else 0.0)
+        val seen = best != null && bestD <= reach && stage.canSee(e, best.x, best.y + 1.62, best.z)
+        val target = best?.let { AiTarget(it.x, it.z, bestD, seen) }
         val speed = MobAi.speedFor(e.arch.id, e.arch.entity, e.modifier?.id == "Speedy", p)
-        val action = MobAi.step(kind, e.plan.mover, pos[0], pos[2], speed, target, e.ai, e.plan.loop, p)
+        val action = MobAi.step(kind, e.plan.mover, pos[0], pos[2], speed, target, e.ai, e.plan.loop, p, search = aiRng.nextDouble() < p.searchChance, rng = aiRng)
         if (e.hidden && e.ai.chasing) { e.hidden = false; stage.reveal(e) }
         stage.act(e, action, best?.y ?: Double.NaN, best?.x ?: Double.NaN, best?.z ?: Double.NaN)
-        if (!attacks() || best == null) return
+        if (!attacks() || best == null || best.isBot) return
         when (action) {
             AiAction.Melee -> damage().meleeHit(run, e.record.id, best.uuid)
             AiAction.Shoot -> {
@@ -305,16 +375,19 @@ object MobsModule : AdsModule, MobService {
             val placement = room?.placement
             if (pack != null && room != null && placement != null && enabled()) {
                 val alias = run.packs.rooms?.let { r -> { n: String -> r.familyOf(n) } }
-                val params = PlanParams(run.config.floor, scale, if (sReplay?.value == false) SpawnMode.CELLS else SpawnMode.LAYOUTS, sPartial?.value ?: MobRolls.PARTIAL_LAYOUT_WEIGHT, (sMoverShare?.value ?: 40) / 100.0, minibossChance = (sMinibossChance?.value ?: 50) / 100.0)
-                val plans = MobPlanner.planRoom(pack, room.name, alias, placement, params, run.subRandom("mobs.room.$roomIndex"))
+                val params = PlanParams(run.config.floor, 1.0,if (sReplay?.value == false) SpawnMode.CELLS else SpawnMode.LAYOUTS, sPartial?.value ?: MobRolls.PARTIAL_LAYOUT_WEIGHT, (sMoverShare?.value ?: 0) / 100.0, minibossChance = (sMinibossChance?.value ?: 65) / 100.0)
+                val plans = roomMobs?.invoke(run, roomIndex) ?: MobPlanner.planRoom(pack, room.name, alias, placement, params, run.subRandom("mobs.room.$roomIndex"))
                 for (pm in plans) register(run, pack, pm, roomIndex)
             }
         }
         return byRoom[roomIndex]?.map { it.record }.orEmpty()
     }
 
+    /** An archetype by index: the pack's, one of the blood camp's ([BloodLooks]) or a levelled room mob ([LevelLooks]). */
+    private fun archOf(pack: MobPack, index: Int): MobArchetype? = pack.archetype(index) ?: BloodLooks.archetype(index) ?: LevelLooks.archetype(index)
+
     private fun register(run: Run, pack: MobPack, pm: PlannedMob, roomIndex: Int?): MobEntry? {
-        val arch = pack.archetype(pm.arch) ?: return null
+        val arch = archOf(pack, pm.arch) ?: return null
         val rec = MobRecord(pm.id, arch.id, arch.name, roomIndex, pm.star, pm.required, arch.cls == "miniboss", arch.disguise && fakePlayersOn())
         rec.hp = pm.maxHp; rec.maxHp = pm.maxHp; rec.x = pm.x; rec.y = pm.y; rec.z = pm.z
         val e = MobEntry(rec, pm, arch, pack.modifier(pm.modifier).takeIf { pm.modifier.isNotEmpty() })
@@ -334,16 +407,20 @@ object MobsModule : AdsModule, MobService {
     override fun spawn(run: Run, spec: MobSpec): MobRecord? {
         val pack = run.packs.mobs ?: return null
         // A kind the pack does not have (a plug-in's camp mobs) stands in as the plain soldier (or the hint in extras), so a camp always has mobs to kill.
-        val arch = pack.archetypeById(spec.kind)
+        val arch = (if (spec.extras["camp"] == "blood") BloodLooks.forName(spec.extras["name"]) else null)
+            ?: pack.archetypeById(spec.kind)
             ?: spec.extras["standIn"]?.let { pack.archetypeById(it) }
             ?: pack.archetypeById(STAND_IN_KIND)?.also { if (standInSaid.add(spec.kind)) log.info("[ads] the mob pack has no '${spec.kind}'; spawning a $STAND_IN_KIND in its place") }
             ?: run { log.warn("[ads] the mob pack has no '${spec.kind}', so it cannot be spawned"); return null }
-        val base = arch.hpFor(run.config.floor) ?: return null
-        val mod = spec.extras["modifier"]?.takeIf { it.isNotEmpty() }?.let { pack.modifier(it) }
-        val hp = spec.hp ?: MobRolls.spawnHp(base, scale, mod)
+        val word = spec.extras["modifier"]?.takeIf { it.isNotEmpty() }
+        val mod = word?.let { pack.modifier(it) }
+        // A room's mob has its room's factor: the run's once a WITHER door scaled the room, none before (the Blood camp's keep the run's).
+        val roomScale = spec.roomIndex?.let { r -> run.plan.rooms.getOrNull(r)?.takeIf { it.type != RoomType.BLOOD } }?.let { if (it.index in scaledRooms) doorScale?.invoke(run, it.index) ?: scale else 1.0 } ?: scale
+        val hp = spec.hp ?: MobRolls.spawnHp(arch.hpFor(run.config.floor) ?: return null, roomScale, mod)
         val rng = run.subRandom("mobs.spec." + entries.size + spec.kind)
         val id = if (arch.disguise) MobRolls.uuidV2(rng) else MobRolls.uuidV4(rng)
-        val pm = PlannedMob(id, arch.index, spec.starred, spec.required, mod?.id.orEmpty(), hp, spec.x, spec.y, spec.z, rng.nextFloat() * 360f - 180f, arch.movement != "static", null)
+        // A camp mob keeps its word even when the pack has no row for it (Stealth, Boomer): its tag is written from the word.
+        val pm = PlannedMob(id, arch.index, spec.starred, spec.required, if (BloodLooks.isBlood(arch)) word.orEmpty() else mod?.id.orEmpty(), hp, spec.x, spec.y, spec.z, rng.nextFloat() * 360f - 180f, arch.movement != "static", null)
         return register(run, pack, pm, spec.roomIndex)?.record
     }
 
@@ -400,7 +477,8 @@ object MobsModule : AdsModule, MobService {
             bar(by, combatBarText(gain, total))
         }
         // The last required mob of a room drops the room's key, if the key plan gives it one.
-        if (lastRequired && room != null && doors().keyForRoom(run, room) != null) doors().dropKey(run, room, x, z)
+        // A replay drops its keys where and when the recording shows them.
+        if (lastRequired && room != null && !com.engineerclient.p3sim.clear.state.StateController.keysFromRecording && doors().keyForRoom(run, room) != null) doors().dropKey(run, room, x, z)
     }
 
     override fun remove(run: Run, id: UUID) {
@@ -417,6 +495,7 @@ object MobsModule : AdsModule, MobService {
     }
 
     override fun clearAll(run: Run) {
+        FairyRoom.clear(); RoomDecor.clear()
         discardAll()
         reset()
     }
@@ -439,7 +518,7 @@ object MobsModule : AdsModule, MobService {
             val p = e.plan
             val m = JsonObject()
             m.addProperty("id", p.id.toString()); m.addProperty("arch", p.arch); m.addProperty("star", p.star); m.addProperty("req", p.required)
-            m.addProperty("mod", p.modifier); m.addProperty("max", p.maxHp); m.addProperty("hp", e.record.hp); m.addProperty("alive", e.record.alive)
+            m.addProperty("mod", p.modifier); m.addProperty("max", p.maxHp); m.addProperty("rmax", e.record.maxHp); m.addProperty("hp", e.record.hp); m.addProperty("alive", e.record.alive)
             m.addProperty("room", e.record.roomIndex ?: -1)
             m.addProperty("px", p.x); m.addProperty("py", p.y); m.addProperty("pz", p.z); m.addProperty("yaw", p.yaw)
             m.addProperty("x", e.x); m.addProperty("y", e.y); m.addProperty("z", e.z)
@@ -449,6 +528,7 @@ object MobsModule : AdsModule, MobService {
         }
         o.add("mobs", a)
         o.add("rolled", JsonArray().also { arr -> rolled.sorted().forEach(arr::add) })
+        o.add("scaled", JsonArray().also { arr -> scaledRooms.sorted().forEach(arr::add) })
         return o
     }
 
@@ -458,15 +538,16 @@ object MobsModule : AdsModule, MobService {
         val pack = run.packs.mobs ?: return
         scale = data.get("scale")?.asDouble ?: 1.0
         data.getAsJsonArray("rolled")?.forEach { rolled += it.asInt }
+        data.getAsJsonArray("scaled")?.forEach { scaledRooms += it.asInt }
         for (el in data.getAsJsonArray("mobs") ?: JsonArray()) {
             val m = el.asJsonObject
-            val arch = pack.archetype(m.get("arch").asInt) ?: continue
+            val arch = archOf(pack, m.get("arch").asInt) ?: continue
             val loop = m.getAsJsonArray("loop")?.map { p -> doubleArrayOf(p.asJsonArray[0].asDouble, p.asJsonArray[1].asDouble) }
             val pm = PlannedMob(UUID.fromString(m.get("id").asString), arch.index, m.get("star").asBoolean, m.get("req").asBoolean, m.get("mod").asString, m.get("max").asDouble,
                 m.get("px").asDouble, m.get("py").asDouble, m.get("pz").asDouble, m.get("yaw").asFloat, m.get("mover").asBoolean, loop)
             val room = m.get("room").asInt.takeIf { it >= 0 }
             val rec = MobRecord(pm.id, arch.id, arch.name, room, pm.star, pm.required, arch.cls == "miniboss", arch.disguise && fakePlayersOn())
-            rec.maxHp = pm.maxHp; rec.hp = m.get("hp").asDouble; rec.alive = m.get("alive").asBoolean
+            rec.maxHp = m.get("rmax")?.asDouble ?: pm.maxHp; rec.hp = m.get("hp").asDouble; rec.alive = m.get("alive").asBoolean
             rec.x = m.get("x").asDouble; rec.y = m.get("y").asDouble; rec.z = m.get("z").asDouble
             val e = MobEntry(rec, pm, arch, pack.modifier(pm.modifier).takeIf { pm.modifier.isNotEmpty() })
             e.x = rec.x; e.y = rec.y; e.z = rec.z
@@ -487,12 +568,27 @@ object MobsModule : AdsModule, MobService {
 
     override fun onInit() { DisguiseSpike.register() }
 
-    override fun devCommands(): List<AdsCommand> = listOf(DisguiseSpike.command(this), mobsCommand)
+    override fun devCommands(): List<AdsCommand> = listOf(DisguiseSpike.command(this), mobsCommand, aiCommand)
 
     /** `/ads dev mobs`: what the module holds, room by room, to check a run against. */
     private val mobsCommand = AdsCommand("mobs", "/ads dev mobs", "Lists the mobs of the run room by room: required alive of total, bodies built, sleepers.", server = { ctx ->
         val run = ctx.run
         if (run == null) ctx.reply("No run is on.") else for (line in summaryLines(run)) ctx.reply(line)
+    })
+
+    /** `/ads dev mobai`: the AI state of the mobs nearest you, to see why one does or does not chase. */
+    private val aiCommand = AdsCommand("mobai", "/ads dev mobai", "The AI state of the ten mobs nearest you: kind, mover, chasing, distance, sight.", server = { ctx ->
+        val run = ctx.run
+        val me = run?.state?.alivePlayers()?.firstOrNull { !it.isBot }
+        if (run == null || me == null) ctx.reply("No run or no player.") else {
+            ctx.reply("t=${run.t} stage=${run.stage} available=${stage.available()} humans=${run.state.alivePlayers().count { !it.isBot }}")
+            val p = params()
+            for (e in entries.values.filter { it.alive }.sortedBy { Math.hypot(it.x - me.x, it.z - me.z) }.take(10)) {
+                val pos = stage.position(e)
+                val d = Math.hypot(e.x - me.x, e.z - me.z)
+                ctx.reply("${e.arch.id} kind=${MobPlanner.aiKind(e.arch, p.assassinTeleportEvery > 0)} mover=${e.plan.mover} live=${e.live} asleep=${e.asleep} chasing=${e.ai.chasing} unseen=${e.ai.unseen} d=${"%.1f".format(d)} see=${stage.canSee(e, me.x, me.y + 1.62, me.z)} nav=${(e.body as? net.minecraft.world.entity.Mob)?.let { m -> "done=" + m.navigation.isDone + " path=" + (m.navigation.path?.let { pa -> "" + pa.nodeCount + "@" + pa.target } ?: "none") + " ai=" + !m.isNoAi + " spd=" + m.speed } ?: e.body?.javaClass?.simpleName} lastNav=${"%.1f".format(e.lastNavX)},${"%.1f".format(e.lastNavZ)} pos=${pos?.joinToString(",") { "%.1f".format(it) }}")
+            }
+        }
     })
 
     internal fun summaryLines(run: Run): List<String> {

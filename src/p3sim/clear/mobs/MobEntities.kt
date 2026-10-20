@@ -1,6 +1,7 @@
 package com.engineerclient.p3sim.clear.mobs
 
 import com.engineerclient.p3sim.SimStand
+import com.engineerclient.p3sim.TransientStand
 import com.engineerclient.p3sim.Station
 import net.minecraft.network.protocol.Packet
 import net.minecraft.network.protocol.game.ClientGamePacketListener
@@ -61,6 +62,12 @@ class AdsEnderman(level: Level) : Enderman(EntityTypes.ENDERMAN, level), AdsMobB
     override fun shouldBeSaved(): Boolean = false
 }
 
+class AdsGiant(level: Level) : net.minecraft.world.entity.monster.Giant(EntityTypes.GIANT, level), AdsMobBody {
+    override fun registerGoals() {}
+    override fun shouldBeSaved(): Boolean = false
+    override fun fireImmune(): Boolean = true
+}
+
 class AdsSilverfish(level: Level) : Silverfish(EntityTypes.SILVERFISH, level), AdsMobBody {
     override fun registerGoals() {}
     override fun shouldBeSaved(): Boolean = false
@@ -102,19 +109,19 @@ object MobBodies {
         repeat(12) {
             val body = makeBody()
             val fillers = (1 until idOffset).map { filler(level) }
-            val stand = SimStand(level)
+            val stand = TransientStand(level)
             if (stand.id == body.id + idOffset && fillers.withIndex().all { (i, f) -> f.id == body.id + 1 + i }) return BuiltMob(body, fillers, stand)
         }
         val body = makeBody()
         val fillers = (1 until idOffset).map { filler(level) }
-        val stand = SimStand(level)
+        val stand = TransientStand(level)
         fillers.forEachIndexed { i, f -> if (level.getEntity(body.id + 1 + i) == null) f.setId(body.id + 1 + i) }
         if (level.getEntity(body.id + idOffset) == null) stand.setId(body.id + idOffset)
         log.warn("[ads] mob ids were not consecutive after 12 tries; forced body ${body.id} tag ${stand.id}")
         return BuiltMob(body, fillers, stand)
     }
 
-    private fun filler(level: ServerLevel): SimStand = SimStand(level).also { it.isInvisible = true; it.isSilent = true; it.isPermanentlyInvulnerable = true; Station.setMarker(it) }
+    private fun filler(level: ServerLevel): SimStand = TransientStand(level).also { it.isInvisible = true; it.isSilent = true; it.isPermanentlyInvulnerable = true; Station.setMarker(it) }
 
     /** Makes the name tag stand invisible, marker-sized, with a visible custom name. */
     fun dressTag(stand: SimStand, name: net.minecraft.network.chat.Component) {

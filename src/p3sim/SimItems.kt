@@ -1011,7 +1011,8 @@ object SimItems {
     val SPIRIT_SCEPTRE get() = item(Items.PAPER, SCEPTRE, "§6 Heroic Spirit Sceptre §6✪✪✪✪✪", listOf(
         "§6Ability: Guided Bat §e§lRIGHT CLICK", "§7Shoots a guided spirit bat, following", "§7your aim and exploding on what it hits.",
         "", "§6§lLEGENDARY DUNGEON SWORD"), glint = true).also { hy(it, "island_relevant/dungeons/spirit_sceptre_fragged", "legendary") }
-    const val SCEPTRE = "STARRED_SPIRIT_SCEPTRE"
+    /** Its SkyBlock id: the Spirit Sceptre is BAT_WAND inside (packdisabler draws it by that id, an allium). */
+    const val SCEPTRE = "STARRED_BAT_WAND"
 
     /** How far a Guided Bat flies before it bursts (blocks). Unmeasured. */
     private const val SCEPTRE_RANGE = 24.0
@@ -1225,11 +1226,17 @@ object SimItems {
         fun sendBack() { if (!p.isRemoved) p.connection.send(net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket(Sim.level, at)) }
         if (p.position().distanceTo(Vec3.atCenterOf(at)) > 12.0) { if (held == "DUNGEONBREAKER") sendBack(); return }
         // A full run: a swing at a closed key door says the no-key line (the adventure-mode player never reaches Fabric's attack callback).
-        DamageModule.activeRun()?.let { Services.doors.touchBlock(it, at.x, at.y, at.z, p.uuid) }
+        // A closed key door that stays shut answers the hit itself: the no-key pair and nothing from the Dungeonbreaker (DR: 955 digs).
+        val shut = DamageModule.activeRun()?.let { Services.doors.touchBlock(it, at.x, at.y, at.z, p.uuid) } == true
+        if (shut) { Fight.afterPing("hit ignored") { sendBack() }; return }
         // A left click on a lever credits it, toggling nothing. With the Dungeonbreaker the click also reaches the mining
         // refusal ("digging there" in S4's device).
         (Fight.phase as? GoldorPhase)?.let { ph -> if (ph.leverAt(at) != null || ph.devices.lights.isLever(at)) { if (!again) ph.devices.leftClick(at); if (held != "DUNGEONBREAKER") return } }
-        if (held == "SUPERBOOM_TNT") { if (!again) Fight.afterPing("superboom") { Fight.later(1, "superboom") { superboom(p, at, face) } }; return }
+        // As its right click: in a run the blast is the secrets module's (crypts, walls), in the boss the gate's.
+        if (held == "SUPERBOOM_TNT") {
+            if (!again) { val run = DamageModule.activeRun(); Fight.afterPing("superboom") { Fight.later(1, "superboom") { if (run != null) superboomRun(run, p, at, face) else superboom(p, at, face) } } }
+            return
+        }
         // Broken as the hit arrives, before the moves your game sends after it: never a block you already walked into.
         if (held == "DUNGEONBREAKER") mine(p, at)
         else Fight.afterPing("hit ignored") { sendBack() }
@@ -1295,12 +1302,13 @@ object SimItems {
         val player = mc.player ?: return false
         val level = mc.level ?: return false
         if (!simClient(level)) return false
-        if (fullStack) SimNet.send("drop", "1")
+        SimNet.send("drop", if (fullStack) "1" else "0")
         return true
     }
 
-    /** The drop key from a player's game ([clientDrop]), as theirs: Ctrl+Q is the class ability. */
+    /** The drop key from a player's game ([clientDrop]), as theirs: in a run's dungeon, the class's Ability (Ctrl+Q) or Ultimate (Q); in P3, Ctrl+Q is the class ability. */
     fun serverDrop(p: ServerPlayer, fullStack: Boolean) {
+        if (com.engineerclient.p3sim.clear.damage.ClassAbilities.press(p, ultimate = !fullStack)) return
         if (!fullStack) return
         if (P3Sim.myClass == com.odtheking.odin.utils.skyblock.dungeon.DungeonClass.ARCHER) asClicked(p, "archer ability") { volley(p) }
         // The Mage's: Guided Sheep.
@@ -1500,6 +1508,8 @@ object SimItems {
                 return InteractionResult.SUCCESS
             }
         }
+        // Mort (or his name stands): his Ready Up window before the run starts.
+        if (com.engineerclient.p3sim.clear.state.MortNpc.owns(e)) { if (!left) com.engineerclient.p3sim.clear.state.ReadyUpMenu.open(p); return InteractionResult.SUCCESS }
         if (e is ItemFrame || e is ArmorStand) return InteractionResult.SUCCESS
         if (e.entityTags().contains(Sim.TAG)) return InteractionResult.SUCCESS
         return InteractionResult.PASS
@@ -1546,8 +1556,10 @@ object SimItems {
     }
 
     fun etherwarp(p: ServerPlayer, range: Double = 61.0) {
-        // Cast from where the server saw you (about one one-way latency ago).
-        val seen = Fight.seenPos(p)
+        // Cast from where you clicked: Hypixel reads the use packet after the move packets sent before it, never after the ones that
+        // follow. A client that moves you at once (Odin's zero-ping etherwarp) has already sent the landing spot when the delayed cast
+        // runs, so a position taken then was a second warp from there.
+        val seen = clickPos ?: p.position()
         val eye = Vec3(seen.x, seen.y + 1.27, seen.z)
         val dir = look(p)
         val hit = dda(eye, dir, range)
@@ -1605,7 +1617,7 @@ object SimItems {
 
     /** AOTV (12) / Hyperion (10): whole-block steps, every quarter checked; "There are blocks in the way!" when cut short. */
     fun blink(p: ServerPlayer, range: Int) {
-        val eye = p.eyePosition
+        val eye = (clickPos ?: p.position()).add(0.0, p.eyeHeight.toDouble(), 0.0)
         val dir = look(p)
         var last = 0
         var px = floor(eye.x).toInt(); var pz = floor(eye.z).toInt()
@@ -1620,10 +1632,19 @@ object SimItems {
             if (cx != px && cz != pz && blinkBlocks(px, cy, cz) && blinkBlocks(cx, cy, pz)) { cut = true; break }
             last = i; px = cx; pz = cz
         }
+        // A landing needs room for the whole body: under a 1-high roof (a hole one block tall) the server stops at the sample before it
+        // (PrecisionSnipes' blink lab, "roof1": both casts short of the roofed cell).
+        fun feetAt(i: Int): Int { val c = eye.add(dir.scale(i.toDouble())); val cx = floor(c.x).toInt(); val cy = floor(c.y).toInt(); val cz = floor(c.z).toInt(); return if (feetPass(cx, cy - 1, cz)) cy - 1 else cy }
+        fun roomy(i: Int): Boolean {
+            val c = eye.add(dir.scale(i.toDouble())); val cx = floor(c.x).toInt(); val cz = floor(c.z).toInt(); val f = feetAt(i)
+            // The head's part of the body (feet + 1 to + 1.8, 0.6 wide) clear of every collision.
+            return Sim.level.noCollision(p, AABB(cx + 0.2, f + 1.0, cz + 0.2, cx + 0.8, f + 1.8, cz + 0.8).deflate(1e-3))
+        }
+        while (last > 0 && !roomy(last)) { last--; cut = true }
         if (last == 0) { Sim.chat("§cThere are blocks in the way!"); return }
         val c = eye.add(dir.scale(last.toDouble()))
-        val cx = floor(c.x).toInt(); val cy = floor(c.y).toInt(); val cz = floor(c.z).toInt()
-        val feetY = if (feetPass(cx, cy - 1, cz)) cy - 1 else cy
+        val cx = floor(c.x).toInt(); val cz = floor(c.z).toInt()
+        val feetY = feetAt(last)
         if (cx == floor(p.x).toInt() && cz == floor(p.z).toInt() && (feetY == floor(p.y + 0.05).toInt() || Vec3(cx + 0.5, feetY.toDouble(), cz + 0.5).distanceTo(p.position()) < 1.5)) {
             Sim.chat("§cThere are blocks in the way!"); return
         }
@@ -1638,12 +1659,16 @@ object SimItems {
     /** The line a disabled ability answers with. UNMEASURED: borrowed from the boss room's refusal (the pearl). */
     private const val ABILITY_LOCKED = "§cYou cannot use abilities in this room!"
 
-    /** Wither Impact's server cooldown: a second cast within 2 server ticks is discarded, blink and Implosion both. */
+    /**
+     * Wither Impact casts once per server tick: a second click handled in the same tick is discarded, blink and Implosion both. In the
+     * DR clears (5,486 casts) a lone click cast 93% of the time, one 1 client tick after a cast 60%, 2 ticks 75%, 3 or more 80-87%: no
+     * cooldown stops the next tick's click, the losses are clicks that Hypixel's lagging ticks handled together.
+     */
     private var lastHype by perPlayer { -100 }
 
     private fun hypeReady(): Boolean {
         val now = Fight.serverTick
-        if (now - lastHype < 2) return false
+        if (now == lastHype) return false
         lastHype = now
         return true
     }
@@ -2176,6 +2201,12 @@ object SimItems {
         val c = Vec3.atCenterOf(pos)
         // No mining rule for "leaving the inner chamber": it is a walking boundary on Hypixel (GoldorPhase.innerChamber).
         // S4's device area (x55-64, y132-136, z142-147) says "digging there" for its lamps, levers and bedrock; the same levers elsewhere say "that block".
+        // The dungeon: a block on a room's outer ring or between rooms says "digging there" whatever it is (DR, 139 runs: 182 of 184 ring
+        // refusals), the barrier of an opening door too; inside a room the block's own rules below decide.
+        DamageModule.activeRun()?.let { run ->
+            if (run.t0Tick == null || run.t < 0) return ""
+            if (com.engineerclient.p3sim.clear.secrets.BreakerRules.inGrid(pos.x, pos.z) && com.engineerclient.p3sim.clear.secrets.BreakerRules.isBorderOrOutside(run.plan, pos.x, pos.z)) return if (p.eyePosition.distanceTo(c) > 5.2) "" else THERE
+        }
         if (SS_DEVICE.contains(c) && (b is ButtonBlock || b == net.minecraft.world.level.block.Blocks.EMERALD_BLOCK || b == net.minecraft.world.level.block.Blocks.REDSTONE_LAMP || b == net.minecraft.world.level.block.Blocks.SEA_LANTERN)) return THERE
         if (S4_DEVICE.contains(c) && (b is LeverBlock || b is ButtonBlock || b == net.minecraft.world.level.block.Blocks.REDSTONE_LAMP || b == net.minecraft.world.level.block.Blocks.BEDROCK)) return THERE
         if (s.getDestroySpeed(Sim.level, pos) < 0) return THAT_BLOCK
@@ -2308,6 +2339,13 @@ object SimItems {
         val now = Fight.serverTick
         if (now < volleyReady) { Sim.chat("§cYour Regular Ability is currently on cooldown for ${(volleyReady - now + 19) / 20} more seconds."); return }
         volleyReady = now + 440
+        volleyArrows(p)
+        Sim.chat("§aUsed §6Explosive Shot§a!")
+        Fight.later(1, "explosive shot summary") { Sim.chat("§7Your Explosive Shot hit §c0 §7enemies for §c0 §7damage.") }
+    }
+
+    /** Explosive Shot's three arrows and their sound, with no cooldown or line (the clear's class abilities keep their own). */
+    internal fun volleyArrows(p: ServerPlayer) {
         val mid = Vec3(p.x, p.y + p.bbHeight / 2, p.z)
         for (dy in listOf(-5.5f, 0f, 5.5f)) {
             val yaw = Math.toRadians((p.yRot + dy).toDouble()); val pitch = Math.toRadians(p.xRot.toDouble())
@@ -2320,8 +2358,6 @@ object SimItems {
                 }
             }?.isCritArrow = true
         }
-        Sim.chat("§aUsed §6Explosive Shot§a!")
-        Fight.later(1, "explosive shot summary") { Sim.chat("§7Your Explosive Shot hit §c0 §7enemies for §c0 §7damage.") }
         Sim.sound(SoundEvents.ARROW_SHOOT, 1f, 0.8f, p.position())
     }
 

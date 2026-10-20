@@ -80,7 +80,7 @@ object EngineerClient : ClientModInitializer {
         listOf(
             PovPreviews, com.engineerclient.p3sim.P3Sim, ADR, SimonSaysPractice, BrWaypoints2, AgroSphere, DungeonSplits, com.engineerclient.practice.Recore,
             com.engineerclient.clearbreakdown.ClearBreakdown,
-            RandomStuff, com.engineerclient.misc.HealthMana, com.engineerclient.misc.Timers,
+            RandomStuff, com.engineerclient.misc.HealthMana, com.engineerclient.misc.Timers, com.engineerclient.misc.LcmMeleeWarning,
         )
     }
 
@@ -104,8 +104,12 @@ object EngineerClient : ClientModInitializer {
         safely("highlight look") { com.engineerclient.misc.OdinHighlightLook.install() }
         safely("splits look") { OdinSplitsLook.install() }
         safely("sub splits tracking") { com.engineerclient.splits.DungeonSplits.install() }
-        safely("terminals look") { com.engineerclient.practice.TerminalsStatusLook.install() }
         safely("term info") { com.engineerclient.practice.TermInfo.init() }
+        // Room Prediction and LCM Style: settings on Odin's own Dungeon Map (from Ascent Client, same names, so saved values
+        // carry over); Odin's configs are read again so they apply (reading never writes the file).
+        safely("lcm style") { com.engineerclient.lcm.LcmStyle.install() }
+        safely("map prediction") { com.engineerclient.mappred.OdinMapPrediction.install() }
+        safely("map configs") { ModuleManager.loadConfigurations() }
         safely("hover terms") { com.engineerclient.practice.TermsimExtras.install() }
         safely("odin term times") { com.engineerclient.practice.OdinTermTimes.install() }
         runCatching { com.engineerclient.misc.LaunchStats.install() }

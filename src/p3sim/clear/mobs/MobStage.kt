@@ -5,6 +5,8 @@ package com.engineerclient.p3sim.clear.mobs
  * which mobs are built when) run headless in tests with a stand-in. [RealStage] is the Minecraft side. Server thread only.
  */
 internal interface MobStage {
+    /** A replay: puts the body where the recording has the mob this tick (no AI), facing the way it moved. */
+    fun place(e: MobEntry, x: Double, y: Double, z: Double) {}
     /** Whether a sim world is running at all. */
     fun available(): Boolean
     /** Whether the chunk of column ([x], [z]) is loaded. */
@@ -37,6 +39,8 @@ internal interface MobStage {
     fun tick() {}
     /** Removes every body still waiting out its death delay (the run ended). */
     fun flush() {}
+    /** Whether the mob's eyes have a clear line to the point (a player's eyes). Stand-ins see everything. */
+    fun canSee(e: MobEntry, x: Double, y: Double, z: Double): Boolean = true
     /** Puts a body that fell out of the world back where it was rolled. */
     fun rescue(e: MobEntry)
 }

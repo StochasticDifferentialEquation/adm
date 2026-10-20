@@ -82,7 +82,7 @@ class ClearPlannerTest {
             }
         }
         val share = split.toDouble() / total
-        assertTrue(share in 0.5..0.95, "the key is taken by another bot than the opener in $share of doors (recorded 0.77)")
+        assertTrue(share in 0.5..0.95, "the key is taken by another bot than the opener in $share of doors (recorded 0.84)")
     }
 
     @Test fun aLoneBotDoesBothAndStillGetsThereBeforeTheDoorFalls() {
@@ -150,7 +150,9 @@ class ClearPlannerTest {
             for (tr in p.tracks) {
                 for ((a, b) in tr.legs.zipWithNext()) {
                     assertEquals(a.t1, b.t0, "seed $seed seat ${tr.seat}: a leg starts where the last ended")
-                    assertTrue(a.b.dist(b.a) < 1e-6, "seed $seed seat ${tr.seat}: a leg starts where the last ended in space (${a.b} vs ${b.a})")
+                    // A leap to the door opener is the one jump.
+                    val leap = p.leaps.any { it.seat == tr.seat && it.t == b.t0 }
+                    assertTrue(leap || a.b.dist(b.a) < 1e-6, "seed $seed seat ${tr.seat}: a leg starts where the last ended in space (${a.b} vs ${b.a})")
                 }
                 assertTrue(tr.legs.first().t0 <= 1)
             }
@@ -171,6 +173,7 @@ class ClearPlannerTest {
                 else -> {}
             }
             for (tr in p.tracks) for (t in 1..p.milestones.maxorT) {
+                if (p.leaps.any { it.seat == tr.seat && it.t == t }) continue   // a leap goes to the opener, wherever that is
                 val a = tr.positionAt(t - 1); val b = tr.positionAt(t)
                 for ((door, passable) in limits) {
                     if (t >= passable) continue
@@ -211,8 +214,9 @@ class ClearPlannerTest {
         val mid = (p.milestones.bloodOpenT + p.milestones.watcherDoneT) / 2
         assertTrue(tr.positionAt(mid).dist(c) < 4.0, "the assigned seat stands in the blood room mid-camp")
         assertTrue(tr.positionAt(p.milestones.watcherDoneT).dist(c) < 4.0)
-        // Nobody else goes there.
-        for (o in p.tracks.filter { it.seat != 1 }) assertTrue(o.positionAt(mid).dist(c) > 4.0, "seat ${o.seat} stays out")
+        // Nobody else walks there; a seat that is in by then leapt to the camper (CampLeaps).
+        val leapt = p.leaps.filter { it.door == CampLeaps.NO_DOOR && it.t <= mid }.map { it.seat }.toSet()
+        for (o in p.tracks.filter { it.seat != 1 && it.seat !in leapt }) assertTrue(o.positionAt(mid).dist(c) > 4.0, "seat ${o.seat} stays out")
     }
 
     @Test fun theNeutralStrategySendsNobodyAndAPluginCannotPickTheHuman() {

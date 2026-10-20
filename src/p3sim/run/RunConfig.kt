@@ -10,6 +10,11 @@ sealed interface LayoutSource {
     data class Seed(val seed: Long) : LayoutSource
     /** A recorded run's layout by id (the run file name without extension). A layout that is not `playable` warns. */
     data class Recorded(val id: String) : LayoutSource
+    /**
+     * Practice: one room alone in the middle of the map (its in-game name, "Blue Skulls"), as a recorded run had it (its build, turn
+     * and puzzle state), entered through the doorway the party came in by, with bedrock behind you and every other side a wall.
+     */
+    data class Practice(val room: String) : LayoutSource
 }
 
 /**
@@ -45,6 +50,8 @@ data class RunConfig(
     val statsPreset: String? = null,
     /** A party strategy id (see the plug-in seam); null or "neutral" = the built-in neutral default. */
     val strategy: String? = null,
+    /** A replay's id (`clear/replay`): the recorded run is played again, your player and the teammates driven by the recording. */
+    val replay: String? = null,
 ) {
     fun toJson(): JsonObject = JsonObject().also { o ->
         o.addProperty("floor", floor)
@@ -52,6 +59,7 @@ data class RunConfig(
             LayoutSource.Random -> o.addProperty("layout", "random")
             is LayoutSource.Seed -> { o.addProperty("layout", "seed"); o.addProperty("layoutSeed", layout.seed) }
             is LayoutSource.Recorded -> { o.addProperty("layout", "recorded"); o.addProperty("layoutId", layout.id) }
+            is LayoutSource.Practice -> { o.addProperty("layout", "practice"); o.addProperty("practiceRoom", layout.room) }
         }
         o.addProperty("seed", seed)
         o.addProperty("bots", bots)
@@ -62,6 +70,7 @@ data class RunConfig(
         if (mobHpScale != null) o.addProperty("mobHpScale", mobHpScale) else o.add("mobHpScale", com.google.gson.JsonNull.INSTANCE)
         statsPreset?.let { o.addProperty("statsPreset", it) }
         strategy?.let { o.addProperty("strategy", it) }
+        replay?.let { o.addProperty("replay", it) }
     }
 
     companion object {
@@ -71,6 +80,7 @@ data class RunConfig(
             val layout = when (str("layout")) {
                 "seed" -> o.get("layoutSeed")?.takeIf { it.isJsonPrimitive }?.asLong?.let { LayoutSource.Seed(it) } ?: LayoutSource.Random
                 "recorded" -> str("layoutId")?.let { LayoutSource.Recorded(it) } ?: LayoutSource.Random
+                "practice" -> str("practiceRoom")?.let { LayoutSource.Practice(it) } ?: LayoutSource.Random
                 else -> LayoutSource.Random
             }
             val d = RunConfig()
@@ -85,6 +95,7 @@ data class RunConfig(
                 mobHpScale = if (o.has("mobHpScale")) o.get("mobHpScale").takeIf { it.isJsonPrimitive }?.asDouble else d.mobHpScale,
                 statsPreset = str("statsPreset"),
                 strategy = str("strategy"),
+                replay = str("replay"),
             )
         }
     }
